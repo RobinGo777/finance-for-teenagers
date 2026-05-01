@@ -26,6 +26,9 @@ UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN", "")
 YOUTUBE_API_KEY      = os.getenv("YOUTUBE_API_KEY", "")
 NEWSAPI_KEY          = os.getenv("NEWSAPI_KEY", "")
 ALPHA_VANTAGE_KEY    = os.getenv("ALPHA_VANTAGE_KEY", "")
+PEXELS_API_KEY       = os.getenv("PEXELS_API_KEY", "")
+UNSPLASH_ACCESS_KEY  = os.getenv("UNSPLASH_ACCESS_KEY", "")
+STOCK_PHOTO_PROVIDER = os.getenv("STOCK_PHOTO_PROVIDER", "auto").lower()
 
 # Безкоштовні — ключі не потрібні
 COINGECKO_URL        = "https://api.coingecko.com/api/v3"

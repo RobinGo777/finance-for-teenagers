@@ -204,6 +204,19 @@ async def cmd_autopilot(message: Message) -> None:
         )
 
 
+@router.message(Command("myid"))
+async def cmd_myid(message: Message) -> None:
+    """/myid — працює з будь-якого чату. Показує ID, щоб налаштувати MODERATOR_CHAT_ID."""
+    chat_id = message.chat.id
+    is_moderator = chat_id == MODERATOR_CHAT_ID
+    await message.answer(
+        f"🆔 Твій chat.id: <code>{chat_id}</code>\n"
+        f"⚙️ MODERATOR_CHAT_ID у конфізі: <code>{MODERATOR_CHAT_ID}</code>\n"
+        f"{'✅ Збігається — команди працюють' if is_moderator else '❌ Не збігається! Встав це число у MODERATOR_CHAT_ID і зроби redeploy'}",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("status"), F.chat.id == MODERATOR_CHAT_ID)
 async def cmd_status(message: Message) -> None:
     """/status — показує поточний стан бота."""

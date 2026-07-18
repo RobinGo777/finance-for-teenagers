@@ -60,12 +60,14 @@ def _build_payload(prompt: str, use_search: bool, json_mode: bool = False) -> di
             "thinkingConfig": {"thinkingBudget": 2048},
         },
     }
-    # ВАЖЛИВО: responseMimeType=application/json НЕ можна поєднувати з
-    # google_search — Gemini тоді повертає порожню відповідь. Тому при пошуку
-    # покладаємось на інструкцію промпту + наш _extract_json для розбору JSON.
-    if json_mode and not use_search:
+    if json_mode:
         payload["generationConfig"]["responseMimeType"] = "application/json"
-    if use_search:
+
+    # ВАЖЛИВО: google_search несумісний зі структурованим JSON-виводом — у такій
+    # комбінації Gemini стабільно повертає порожню відповідь. Тому інструмент
+    # пошуку вмикаємо лише для звичайної текстової генерації, не для JSON.
+    # Свіжі дані рубрики і так додаються у промпт через fetchers.
+    if use_search and not json_mode:
         # Актуальний інструмент для Gemini 2.0+; google_search_retrieval застарів.
         payload["tools"] = [{"google_search": {}}]
     return payload
@@ -258,7 +260,7 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
 
     raise ValueError(
         f"Усі Gemini-моделі повернули помилку або невалідний JSON. "
-        f"Остання відповідь:\n{last_raw}"
+        f"Причина: {last_exc}. Остання відповідь:\n{last_raw[:400]}"
     ) from last_exc
 
 

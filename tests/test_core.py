@@ -149,10 +149,19 @@ class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tools", payload)
         self.assertNotIn("key=", gemini._model_url("gemini-test"))
 
-    def test_search_mode_drops_mime_type_to_stay_compatible(self) -> None:
-        # google_search + responseMimeType=application/json несумісні → порожня
-        # відповідь. При пошуку MIME-тип не задаємо, а інструмент лишаємо.
+    def test_json_mode_never_enables_search_tool(self) -> None:
+        # google_search + JSON-вивід несумісні → порожня відповідь. У JSON-режимі
+        # інструмент пошуку не додаємо навіть якщо use_search=True.
         payload = gemini._build_payload("test", use_search=True, json_mode=True)
+
+        self.assertNotIn("tools", payload)
+        self.assertEqual(
+            payload["generationConfig"]["responseMimeType"],
+            "application/json",
+        )
+
+    def test_search_tool_used_for_plain_text_generation(self) -> None:
+        payload = gemini._build_payload("test", use_search=True, json_mode=False)
 
         self.assertEqual(payload["tools"], [{"google_search": {}}])
         self.assertNotIn("responseMimeType", payload["generationConfig"])

@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -147,6 +148,14 @@ class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
             "application/json",
         )
         self.assertNotIn("key=", gemini._model_url("gemini-test"))
+
+    def test_extract_json_handles_trailing_extra_brace(self) -> None:
+        # Модель інколи додає зайву `}` у кінці (реальний кейс рубрики video).
+        raw = '```json\n{"video_id": "abc", "post": "текст"}\n}\n```'
+        parsed = json.loads(gemini._extract_json(raw))
+
+        self.assertEqual(parsed["video_id"], "abc")
+        self.assertEqual(parsed["post"], "текст")
 
     async def test_invalid_json_switches_to_fallback_model(self) -> None:
         request = AsyncMock(side_effect=["not json", '{"ok": true}'])

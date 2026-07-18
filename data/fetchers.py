@@ -69,7 +69,8 @@ async def fetch_trending_crypto() -> list:
 
 async def fetch_nbu_rates(currencies: list = ["USD", "EUR", "PLN"]) -> dict:
     """Повертає офіційний курс НБУ для вказаних валют."""
-    r = await _get_client().get(NBU_URL, params={"json": ""})
+    # NBU очікує прапорець `?json` без значення; `?json=` дає 404.
+    r = await _get_client().get(f"{NBU_URL}?json")
     r.raise_for_status()
     all_rates = r.json()
     return {

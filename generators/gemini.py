@@ -52,8 +52,12 @@ def _build_payload(prompt: str, use_search: bool, json_mode: bool = False) -> di
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.85,
-            # Gemini 3.x може витрачати частину output budget на thinking.
-            "maxOutputTokens": 4096,
+            # Gemini 2.5/3.x рахують thinking-токени у межах maxOutputTokens.
+            # Даємо великий бюджет, щоб після «роздумів» лишалось місце на текст,
+            # інакше відповідь приходить порожня (finishReason=MAX_TOKENS).
+            "maxOutputTokens": 8192,
+            # Обмежуємо самі роздуми, щоб гарантовано лишити місце на вивід.
+            "thinkingConfig": {"thinkingBudget": 2048},
         },
     }
     if json_mode:
@@ -64,7 +68,29 @@ def _build_payload(prompt: str, use_search: bool, json_mode: bool = False) -> di
     return payload
 
 
+def _payload_without_thinking(payload: dict) -> dict:
+    """Копія payload без thinkingConfig — для моделей, що не знають цього поля."""
+    gen = {k: v for k, v in payload.get("generationConfig", {}).items() if k != "thinkingConfig"}
+    return {**payload, "generationConfig": gen}
+
+
 async def _request_model(model: str, payload: dict) -> str:
+    """Запит до моделі зі стійкістю до непідтримуваного thinkingConfig.
+
+    Якщо модель не знає поля thinkingConfig і повертає 400 — повторюємо той
+    самий запит без нього (тоді працює лише збільшений maxOutputTokens).
+    """
+    try:
+        return await _do_request(model, payload)
+    except httpx.HTTPStatusError as error:
+        has_thinking = "thinkingConfig" in payload.get("generationConfig", {})
+        if error.response.status_code == 400 and has_thinking:
+            logger.warning("%s не підтримує thinkingConfig — повтор без нього", model)
+            return await _do_request(model, _payload_without_thinking(payload))
+        raise
+
+
+async def _do_request(model: str, payload: dict) -> str:
     """Виконує один запит до конкретної моделі та дістає весь текст відповіді."""
     response = await _get_client().post(
         _model_url(model),
@@ -151,14 +177,41 @@ async def generate(prompt: str, use_search: bool = False) -> str:
 
 
 def _extract_json(raw: str) -> str:
-    """Очищає markdown-обгортку і виділяє JSON-об'єкт з тексту."""
+    """Очищає markdown-обгортку і виділяє ПЕРШИЙ збалансований JSON-об'єкт.
+
+    Модель інколи додає текст до/після JSON або зайву закривну дужку в кінці.
+    Тому шукаємо першу `{` і її парну `}`, ігноруючи дужки всередині рядків.
+    """
     clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    # Іноді модель додає текст до/після JSON — беремо перший {...} блок.
     start = clean.find("{")
+    if start == -1:
+        return clean
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(clean)):
+        ch = clean[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return clean[start : i + 1]
+
+    # Дужки не збалансувались — беремо до останньої `}` як запасний варіант.
     end = clean.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        clean = clean[start : end + 1]
-    return clean
+    return clean[start : end + 1] if end > start else clean[start:]
 
 
 async def generate_json(prompt: str, use_search: bool = False) -> dict:

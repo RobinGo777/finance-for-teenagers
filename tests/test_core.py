@@ -139,15 +139,23 @@ class RedisHelpersTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
-    def test_payload_uses_current_search_tool_and_json_mode(self) -> None:
-        payload = gemini._build_payload("test", use_search=True, json_mode=True)
+    def test_json_mode_without_search_sets_mime_type(self) -> None:
+        payload = gemini._build_payload("test", use_search=False, json_mode=True)
 
-        self.assertEqual(payload["tools"], [{"google_search": {}}])
         self.assertEqual(
             payload["generationConfig"]["responseMimeType"],
             "application/json",
         )
+        self.assertNotIn("tools", payload)
         self.assertNotIn("key=", gemini._model_url("gemini-test"))
+
+    def test_search_mode_drops_mime_type_to_stay_compatible(self) -> None:
+        # google_search + responseMimeType=application/json несумісні → порожня
+        # відповідь. При пошуку MIME-тип не задаємо, а інструмент лишаємо.
+        payload = gemini._build_payload("test", use_search=True, json_mode=True)
+
+        self.assertEqual(payload["tools"], [{"google_search": {}}])
+        self.assertNotIn("responseMimeType", payload["generationConfig"])
 
     def test_extract_json_handles_trailing_extra_brace(self) -> None:
         # Модель інколи додає зайву `}` у кінці (реальний кейс рубрики video).

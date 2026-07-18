@@ -46,7 +46,7 @@ STOCK_PHOTO_PROVIDER = os.getenv("STOCK_PHOTO_PROVIDER", "auto").lower()
 
 # Безкоштовні — ключі не потрібні
 COINGECKO_URL        = "https://api.coingecko.com/api/v3"
-NBU_URL              = "https://bank.gov.ua/NBUStatService/v1/statdataservice/exchange"
+NBU_URL              = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange"
 FRED_URL             = "https://api.stlouisfed.org/fred/series/observations"
 WORLD_BANK_URL       = "https://api.worldbank.org/v2"
 GITHUB_API_URL       = "https://api.github.com/search/repositories"

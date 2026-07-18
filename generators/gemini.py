@@ -60,7 +60,10 @@ def _build_payload(prompt: str, use_search: bool, json_mode: bool = False) -> di
             "thinkingConfig": {"thinkingBudget": 2048},
         },
     }
-    if json_mode:
+    # ВАЖЛИВО: responseMimeType=application/json НЕ можна поєднувати з
+    # google_search — Gemini тоді повертає порожню відповідь. Тому при пошуку
+    # покладаємось на інструкцію промпту + наш _extract_json для розбору JSON.
+    if json_mode and not use_search:
         payload["generationConfig"]["responseMimeType"] = "application/json"
     if use_search:
         # Актуальний інструмент для Gemini 2.0+; google_search_retrieval застарів.

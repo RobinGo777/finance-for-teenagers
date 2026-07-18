@@ -1,62 +1,209 @@
+import asyncio
 import json
+import logging
 import random
 import httpx
 from config import (
     GEMINI_API_KEY,
-    GEMINI_MODEL,
+    GEMINI_MODELS,
     PERSONAS,
     VISUAL_TEMPLATES,
 )
 from data.redis_client import get_last_template, save_last_template
 
+logger = logging.getLogger(__name__)
+
 # ─────────────────────────────────────────
 # БАЗОВИЙ КЛІЄНТ GEMINI API
 # ─────────────────────────────────────────
 
-GEMINI_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-)
+# Кількість спроб для кожної моделі перед переходом до наступної.
+MODEL_RETRIES = 2
+RETRY_BASE_DELAY = 2  # секунди (експоненційний backoff)
+
+# Спільний HTTP-клієнт (пул з'єднань) — створюється лениво.
+_client: httpx.AsyncClient | None = None
 
 
-async def generate(prompt: str, use_search: bool = False) -> str:
-    """
-    Відправляє промпт до Gemini і повертає текст відповіді.
-    use_search=True — вмикає Google Search Grounding (свіжі новини).
-    """
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=30)
+    return _client
+
+
+async def close() -> None:
+    """Закриває спільний HTTP-клієнт (викликати при зупинці бота)."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
+
+
+def _model_url(model: str) -> str:
+    return (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+
+
+def _build_payload(prompt: str, use_search: bool, json_mode: bool = False) -> dict:
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.85,
-            "maxOutputTokens": 1024,
+            # Gemini 3.x може витрачати частину output budget на thinking.
+            "maxOutputTokens": 4096,
         },
     }
-
+    if json_mode:
+        payload["generationConfig"]["responseMimeType"] = "application/json"
     if use_search:
-        payload["tools"] = [{"google_search_retrieval": {}}]
+        # Актуальний інструмент для Gemini 2.0+; google_search_retrieval застарів.
+        payload["tools"] = [{"google_search": {}}]
+    return payload
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(GEMINI_URL, json=payload)
+
+async def _request_model(model: str, payload: dict) -> str:
+    """Виконує один запит до конкретної моделі та дістає весь текст відповіді."""
+    response = await _get_client().post(
+        _model_url(model),
+        headers={"x-goog-api-key": GEMINI_API_KEY},
+        json=payload,
+    )
+
+    # Інший model fallback не виправить невірний/заблокований API-ключ.
+    if response.status_code in (401, 403):
         response.raise_for_status()
-        data = response.json()
 
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError) as e:
-        raise ValueError(f"Невірна відповідь Gemini: {data}") from e
+    response.raise_for_status()
+    data = response.json()
+
+    # Промпт цілком заблоковано (safety / recitation) — кандидатів немає.
+    candidates = data.get("candidates") or []
+    if not candidates:
+        block = (data.get("promptFeedback") or {}).get("blockReason", "невідомо")
+        raise ValueError(f"{model}: запит заблоковано (blockReason={block})")
+
+    candidate = candidates[0]
+    parts = (candidate.get("content") or {}).get("parts") or []
+    text = "".join(part.get("text", "") for part in parts).strip()
+    if not text:
+        # Порожня відповідь буває при safety-фільтрі або коли thinking-токени
+        # (Gemini 3.x) з'їли весь бюджет виводу (finishReason=MAX_TOKENS).
+        finish = candidate.get("finishReason", "невідомо")
+        raise ValueError(f"{model}: порожня відповідь (finishReason={finish})")
+    return text
+
+
+def _should_retry(error: Exception) -> bool:
+    """Чи має сенс повторити ту саму модель перед fallback."""
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return status == 429 or status >= 500
+    return isinstance(error, (httpx.TimeoutException, httpx.NetworkError))
+
+
+async def _sleep_before_retry(attempt: int) -> None:
+    await asyncio.sleep(RETRY_BASE_DELAY * attempt)
+
+
+async def generate(prompt: str, use_search: bool = False) -> str:
+    """
+    Генерує текст із автоматичним fallback між моделями.
+
+    Кожна модель отримує до MODEL_RETRIES спроб для тимчасових помилок.
+    При недоступності, quota limit або несумісності API береться наступна.
+    """
+    payload = _build_payload(prompt, use_search=use_search)
+    last_exc: Exception | None = None
+
+    for model in GEMINI_MODELS:
+        for attempt in range(1, MODEL_RETRIES + 1):
+            try:
+                text = await _request_model(model, payload)
+                logger.info("Gemini відповідь згенеровано моделлю %s", model)
+                return text
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code in (401, 403):
+                    raise
+                last_exc = error
+            except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
+                last_exc = error
+
+            logger.warning(
+                "Gemini %s, спроба %s/%s: %s",
+                model,
+                attempt,
+                MODEL_RETRIES,
+                last_exc,
+            )
+            if attempt < MODEL_RETRIES and _should_retry(last_exc):
+                await _sleep_before_retry(attempt)
+                continue
+            break
+
+        logger.warning("Перемикання Gemini з %s на резервну модель", model)
+
+    raise ValueError(
+        f"Усі Gemini-моделі недоступні: {', '.join(GEMINI_MODELS)}"
+    ) from last_exc
+
+
+def _extract_json(raw: str) -> str:
+    """Очищає markdown-обгортку і виділяє JSON-об'єкт з тексту."""
+    clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    # Іноді модель додає текст до/після JSON — беремо перший {...} блок.
+    start = clean.find("{")
+    end = clean.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        clean = clean[start : end + 1]
+    return clean
 
 
 async def generate_json(prompt: str, use_search: bool = False) -> dict:
     """
-    Генерує відповідь і парсить як JSON.
-    Автоматично очищає markdown-блоки ```json ... ```
+    Генерує JSON із fallback між моделями.
+
+    Невалідний JSON також вважається збоєм моделі: після повторної спроби
+    генерація переходить до наступної моделі зі списку.
     """
-    raw = await generate(prompt, use_search=use_search)
-    clean = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Gemini повернув не JSON:\n{raw}") from e
+    payload = _build_payload(prompt, use_search=use_search, json_mode=True)
+    last_exc: Exception | None = None
+    last_raw = ""
+
+    for model in GEMINI_MODELS:
+        for attempt in range(1, MODEL_RETRIES + 1):
+            try:
+                last_raw = await _request_model(model, payload)
+                result = json.loads(_extract_json(last_raw))
+                logger.info("Gemini JSON згенеровано моделлю %s", model)
+                return result
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code in (401, 403):
+                    raise
+                last_exc = error
+            except json.JSONDecodeError as error:
+                last_exc = error
+            except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
+                last_exc = error
+
+            logger.warning(
+                "Gemini JSON %s, спроба %s/%s: %s",
+                model,
+                attempt,
+                MODEL_RETRIES,
+                last_exc,
+            )
+            if attempt < MODEL_RETRIES:
+                await _sleep_before_retry(attempt)
+
+        logger.warning("JSON fallback: перемикання з моделі %s", model)
+
+    raise ValueError(
+        f"Усі Gemini-моделі повернули помилку або невалідний JSON. "
+        f"Остання відповідь:\n{last_raw}"
+    ) from last_exc
 
 
 # ─────────────────────────────────────────

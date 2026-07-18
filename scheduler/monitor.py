@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import logging
 from datetime import datetime
 import pytz
 
@@ -19,9 +21,21 @@ from data.redis_client import (
 from data.fetchers import fetch_all_rss, fetch_news, fetch_github_trending
 from generators.video import generate_video
 from generators.ai_news import generate_ai_news
-from bot.publisher import publish
+from bot.publisher import publish, notify_moderator
 
 KYIV = pytz.timezone(TIMEZONE)
+logger = logging.getLogger(__name__)
+
+
+def _stable_id(prefix: str, text: str) -> str:
+    """Стабільний ідентифікатор для дедуплікації (переживає рестарт процесу).
+
+    Вбудований hash() рандомізований між запусками (PYTHONHASHSEED), тож для
+    збереження в Redis потрібен детермінований хеш.
+    """
+    digest = hashlib.md5((text or "").encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}:{digest}"
+
 
 # Мінімальний score щоб вважати новину "breaking"
 BREAKING_MIN_KEYWORDS = [
@@ -40,17 +54,18 @@ async def start_monitor() -> None:
     Безкінечний цикл — перевіряє нові матеріали кожні N годин.
     Не працює вночі (00:00 — 07:00 Київ).
     """
-    print("[monitor] Запущено реалтайм моніторинг")
+    logger.info("[monitor] Запущено реалтайм моніторинг")
 
     while True:
         try:
             await asyncio.sleep(MONITOR_INTERVAL_HOURS * 3600)
             await run_monitor_cycle()
         except asyncio.CancelledError:
-            print("[monitor] Зупинено")
+            logger.info("[monitor] Зупинено")
             break
         except Exception as e:
-            print(f"[monitor] Помилка циклу: {e}")
+            logger.exception("[monitor] Помилка циклу: %s", e)
+            await notify_moderator(f"⚠️ Збій циклу моніторингу: {e}")
             await asyncio.sleep(60)
 
 
@@ -69,16 +84,19 @@ async def run_monitor_cycle() -> None:
     # Перевіряємо ліміт постів на день
     count = await get_monitor_count_today()
     if count >= MONITOR_MAX_PER_DAY:
-        print(f"[monitor] Ліміт {MONITOR_MAX_PER_DAY} постів досягнуто")
+        logger.info("[monitor] Ліміт %s постів досягнуто", MONITOR_MAX_PER_DAY)
         return
 
-    # Запускаємо всі перевірки паралельно
-    await asyncio.gather(
-        _check_video(),
-        _check_breaking_news(),
-        _check_github_trending(),
-        return_exceptions=True,
-    )
+    # Перевірки — ПОСЛІДОВНО, а не gather.
+    # Інакше три корутини одночасно проходять перевірку ліміту й можуть
+    # опублікувати більше, ніж MONITOR_MAX_PER_DAY (гонка).
+    for check in (_check_video, _check_breaking_news, _check_github_trending):
+        if await get_monitor_count_today() >= MONITOR_MAX_PER_DAY:
+            break
+        try:
+            await check()
+        except Exception as e:
+            logger.exception("[monitor] Помилка перевірки %s: %s", check.__name__, e)
 
 
 # ─────────────────────────────────────────
@@ -94,9 +112,9 @@ async def _check_video() -> None:
             if count < MONITOR_MAX_PER_DAY:
                 await publish(post_data)
                 await increment_monitor_count()
-                print(f"[monitor] Відео опубліковано: {post_data.get('topic')}")
+                logger.info("[monitor] Відео опубліковано: %s", post_data.get("topic"))
     except Exception as e:
-        print(f"[monitor] Помилка відео: {e}")
+        logger.exception("[monitor] Помилка відео: %s", e)
 
 
 async def _check_breaking_news() -> None:
@@ -107,15 +125,16 @@ async def _check_breaking_news() -> None:
         all_items  = rss_items + news_items
 
         for item in all_items:
-            title = item.get("title", "").lower()
+            raw_title = item.get("title", "")
+            title = raw_title.lower()
 
             # Перевіряємо чи є ключові слова
             is_breaking = any(kw.lower() in title for kw in BREAKING_MIN_KEYWORDS)
             if not is_breaking:
                 continue
 
-            # Перевіряємо чи вже публікували
-            item_id = f"news:{hash(item.get('title', ''))}"
+            # Перевіряємо чи вже публікували (стабільний хеш — переживає рестарт)
+            item_id = _stable_id("news", raw_title)
             if await is_published(item_id):
                 continue
 
@@ -124,16 +143,17 @@ async def _check_breaking_news() -> None:
             if count >= MONITOR_MAX_PER_DAY:
                 return
 
-            post_data = await generate_ai_news()
+            # Передаємо саме знайдений заголовок як фокус поста
+            post_data = await generate_ai_news(focus=raw_title)
             if post_data:
                 await publish(post_data)
                 await mark_published(item_id)
                 await increment_monitor_count()
-                print(f"[monitor] Breaking news: {item.get('title', '')[:60]}")
+                logger.info("[monitor] Breaking news: %s", raw_title[:60])
                 return  # одна новина за цикл
 
     except Exception as e:
-        print(f"[monitor] Помилка breaking news: {e}")
+        logger.exception("[monitor] Помилка breaking news: %s", e)
 
 
 async def _check_github_trending() -> None:
@@ -142,7 +162,7 @@ async def _check_github_trending() -> None:
         repos = await fetch_github_trending(topic="artificial-intelligence")
 
         for repo in repos:
-            repo_id = f"github:{repo['name']}"
+            repo_id = _stable_id("github", repo["name"])
             if await is_published(repo_id):
                 continue
 
@@ -154,17 +174,23 @@ async def _check_github_trending() -> None:
             if count >= MONITOR_MAX_PER_DAY:
                 return
 
-            # Публікуємо як #ШІ_новини
-            post_data = await generate_ai_news()
+            # Формуємо фокус про конкретний репозиторій
+            focus = (
+                f"Трендовий GitHub-проєкт '{repo['name']}' (⭐{repo['stars']}): "
+                f"{repo.get('description') or 'опис відсутній'}"
+            )
+
+            # Публікуємо як #ШІ_новини саме про цей проєкт
+            post_data = await generate_ai_news(focus=focus)
             if post_data:
                 await publish(post_data)
                 await mark_published(repo_id)
                 await increment_monitor_count()
-                print(f"[monitor] GitHub trending: {repo['name']} ⭐{repo['stars']}")
+                logger.info("[monitor] GitHub trending: %s ⭐%s", repo["name"], repo["stars"])
                 return
 
     except Exception as e:
-        print(f"[monitor] Помилка GitHub trending: {e}")
+        logger.exception("[monitor] Помилка GitHub trending: %s", e)
 
 
 # ─────────────────────────────────────────

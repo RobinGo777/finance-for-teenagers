@@ -1,6 +1,9 @@
 import json
+from datetime import datetime
+
 import httpx
-from config import UPSTASH_REDIS_URL, UPSTASH_REDIS_TOKEN, MAX_USED_TOPICS_IN_PROMPT
+import pytz
+from config import UPSTASH_REDIS_URL, UPSTASH_REDIS_TOKEN, MAX_USED_TOPICS_IN_PROMPT, TIMEZONE
 
 # ─────────────────────────────────────────
 # Базовий клієнт Upstash Redis (REST API)
@@ -11,17 +14,35 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
+# Спільний HTTP-клієнт (пул з'єднань) — створюється лениво.
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=15)
+    return _client
+
 
 async def _request(command: list) -> dict:
     """Виконує Redis команду через Upstash REST API."""
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            UPSTASH_REDIS_URL,
-            headers=HEADERS,
-            json=command,
-        )
-        response.raise_for_status()
-        return response.json()
+    client = _get_client()
+    response = await client.post(
+        UPSTASH_REDIS_URL,
+        headers=HEADERS,
+        json=command,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def close() -> None:
+    """Закриває спільний HTTP-клієнт (викликати при зупинці бота)."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
 
 
 # ─────────────────────────────────────────
@@ -33,7 +54,7 @@ async def get(key: str) -> str | None:
     return result.get("result")
 
 
-async def set(key: str, value: str, ex: int = None) -> bool:
+async def set_value(key: str, value: str, ex: int = None) -> bool:
     """Зберігає значення. ex — TTL в секундах (необов'язково)."""
     cmd = ["SET", key, value]
     if ex:
@@ -98,6 +119,11 @@ async def lrem(key: str, count: int, value: str) -> int:
     return result.get("result", 0)
 
 
+async def ltrim(key: str, start: int, end: int) -> bool:
+    result = await _request(["LTRIM", key, start, end])
+    return result.get("result") == "OK"
+
+
 # ─────────────────────────────────────────
 # HASH ОПЕРАЦІЇ (для збереження даних квізу)
 # ─────────────────────────────────────────
@@ -138,14 +164,30 @@ async def expire(key: str, seconds: int) -> bool:
 # ─────────────────────────────────────────
 
 async def get_used_topics(rubric_key: str) -> list:
-    """Повертає список використаних тем для рубрики (макс MAX_USED_TOPICS_IN_PROMPT)."""
-    topics = await smembers(f"{rubric_key}:used_topics")
-    return list(topics)[:MAX_USED_TOPICS_IN_PROMPT]
+    """Повертає останні використані теми рубрики (макс MAX_USED_TOPICS_IN_PROMPT).
+
+    Зберігаємо як обмежений список (найновіші — першими), щоб набір не ріс
+    безмежно і в промпт потрапляли саме свіжі теми, а не випадкові.
+    """
+    topics = await lrange(f"{rubric_key}:used_topics", 0, MAX_USED_TOPICS_IN_PROMPT - 1)
+    # Прибираємо можливі дублікати, зберігаючи порядок.
+    seen: set = set()
+    unique = []
+    for t in topics:
+        if t and t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique
 
 
 async def save_topic(rubric_key: str, topic: str) -> None:
-    """Зберігає використану тему для рубрики."""
-    await sadd(f"{rubric_key}:used_topics", topic)
+    """Зберігає використану тему рубрики в обмежений список (з обрізанням)."""
+    if not topic:
+        return
+    key = f"{rubric_key}:used_topics"
+    await lpush(key, topic)
+    # Тримаємо трохи більше, ніж потрібно для промпту (буфер під дублікати).
+    await ltrim(key, 0, MAX_USED_TOPICS_IN_PROMPT * 2 - 1)
 
 
 async def get_autopilot() -> bool:
@@ -156,7 +198,7 @@ async def get_autopilot() -> bool:
 
 async def set_autopilot(enabled: bool) -> None:
     """Вмикає або вимикає автопілот."""
-    await set("settings:autopilot", "on" if enabled else "off")
+    await set_value("settings:autopilot", "on" if enabled else "off")
 
 
 async def get_last_template() -> list:
@@ -169,20 +211,30 @@ async def save_last_template(template_name: str) -> None:
     """Зберігає останні 2 шаблони."""
     last = await get_last_template()
     last.append(template_name)
-    await set("settings:last_templates", json.dumps(last[-2:]))
+    await set_value("settings:last_templates", json.dumps(last[-2:]))
+
+
+def _monitor_count_key() -> str:
+    """Ключ лічильника з датою за Києвом — авто-скидання рівно опівночі.
+
+    Раніше ключ був спільний з TTL 86400, тож лічильник обнулявся через 24 год
+    від першого поста, а не о півночі. Датовий ключ вирішує це.
+    """
+    today = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d")
+    return f"monitor:daily_count:{today}"
 
 
 async def get_monitor_count_today() -> int:
-    """Скільки реалтайм постів опубліковано сьогодні."""
-    value = await get("monitor:daily_count")
+    """Скільки реалтайм постів опубліковано сьогодні (за київською датою)."""
+    value = await get(_monitor_count_key())
     return int(value) if value else 0
 
 
 async def increment_monitor_count() -> None:
-    """+1 до лічильника реалтайм постів. Скидається о півночі."""
-    key = "monitor:daily_count"
+    """+1 до лічильника реалтайм постів. Ключ прив'язаний до дати."""
+    key = _monitor_count_key()
     await incr(key)
-    await expire(key, 86400)  # 24 години
+    await expire(key, 172800)  # 2 доби — щоб ключ сам прибрався
 
 
 async def is_published(item_id: str) -> bool:
@@ -197,7 +249,7 @@ async def mark_published(item_id: str) -> None:
 
 async def save_quiz_pending(poll_id: str, data: dict) -> None:
     """Зберігає дані квізу для відповіді через 24 год."""
-    await set(f"quiz:pending:{poll_id}", json.dumps(data), ex=172800)  # 48 год
+    await set_value(f"quiz:pending:{poll_id}", json.dumps(data), ex=172800)  # 48 год
 
 
 async def add_quiz_pending_id(poll_id: str) -> None:
@@ -212,9 +264,35 @@ async def get_quiz_pending(poll_id: str) -> dict | None:
 
 
 async def clear_quiz_pending(poll_id: str) -> None:
-    """Видаляє pending-дані та poll_id зі списку."""
+    """Видаляє pending-дані, голоси та poll_id зі списку."""
     await delete(f"quiz:pending:{poll_id}")
+    await delete(f"quiz:votes:{poll_id}")
     await lrem("quiz:pending_ids", 0, poll_id)
+
+
+# ─────────────────────────────────────────
+# ГОЛОСИ КВІЗУ (для статистики «X% відповіли правильно»)
+# ─────────────────────────────────────────
+# Зберігаємо останній вибір кожного користувача: user_id -> option_index.
+# Так коректно враховуємо зміну голосу і рахуємо підсумок при відповіді.
+
+async def save_quiz_vote(poll_id: str, user_id: int, option_index: int) -> None:
+    await hset(f"quiz:votes:{poll_id}", str(user_id), str(option_index))
+    await expire(f"quiz:votes:{poll_id}", 172800)  # 2 доби
+
+
+async def remove_quiz_vote(poll_id: str, user_id: int) -> None:
+    """Користувач відкликав голос."""
+    await hdel(f"quiz:votes:{poll_id}", str(user_id))
+
+
+async def get_quiz_results(poll_id: str) -> dict:
+    """Повертає підсумок голосів: {option_index(str): кількість}."""
+    raw = await hgetall(f"quiz:votes:{poll_id}")
+    results: dict = {}
+    for option_index in raw.values():
+        results[option_index] = results.get(option_index, 0) + 1
+    return results
 
 
 async def clear_weekly_topics() -> None:

@@ -81,12 +81,19 @@ async def main() -> None:
     try:
         await dp.start_polling(bot, allowed_updates=["message", "callback_query", "poll_answer"])
     finally:
+        from data.redis_client import close as close_redis
+        from generators.gemini import close as close_gemini
+        from data.fetchers import close as close_fetchers
+
         scheduler.shutdown()
         monitor_task.cancel()
         keepalive_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await keepalive_task
         await bot.session.close()
+        await close_gemini()
+        await close_fetchers()
+        await close_redis()
         logger.info("🛑 Бот зупинено")
 
 

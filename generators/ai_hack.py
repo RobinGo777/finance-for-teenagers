@@ -1,7 +1,7 @@
 from datetime import datetime
 from generators.gemini import generate_json, pick_persona, pick_template, build_base_prompt
 from data.redis_client import get_used_topics, save_topic, add_weekly_topic
-from images.generator import generate_post_image
+from images.generator import generate_post_image_async
 
 RUBRIC_KEY     = "ai_hack"
 RUBRIC_NAME    = "#ШІ_Лайфхак"
@@ -45,7 +45,7 @@ async def generate_ai_hack() -> dict:
 
     data = await generate_json(prompt)
 
-    image_bytes = generate_post_image(
+    image_bytes = await generate_post_image_async(
         title=data.get("title", RUBRIC_NAME),
         body=data.get("body_preview", ""),
         rubric=RUBRIC_HASHTAG,

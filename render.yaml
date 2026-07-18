@@ -1,11 +1,9 @@
 services:
   - type: web
     name: finpro-bot
-    runtime: python
+    runtime: docker
     plan: free
     autoDeploy: true
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
     healthCheckPath: /
     envVars:
       - key: TELEGRAM_BOT_TOKEN
@@ -23,6 +21,4 @@ services:
       - key: YOUTUBE_API_KEY
         sync: false
       - key: NEWSAPI_KEY
-        sync: false
-      - key: ALPHA_VANTAGE_KEY
         sync: false

@@ -1,10 +1,10 @@
+import asyncio
 import feedparser
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from config import (
     COINGECKO_URL,
     NBU_URL,
-    ALPHA_VANTAGE_KEY,
     YOUTUBE_API_KEY,
     NEWSAPI_KEY,
     GITHUB_API_URL,
@@ -13,6 +13,28 @@ from config import (
     RSS_FEEDS,
     YOUTUBE_MIN_VIEWS,
 )
+
+# ─────────────────────────────────────────
+# СПІЛЬНИЙ HTTP-КЛІЄНТ (пул з'єднань)
+# ─────────────────────────────────────────
+
+_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=15, follow_redirects=True)
+    return _client
+
+
+async def close() -> None:
+    """Закриває спільний HTTP-клієнт (викликати при зупинці бота)."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
+
 
 # ─────────────────────────────────────────
 # COINGECKO — курси крипти
@@ -27,18 +49,16 @@ async def fetch_crypto(coins: list = ["bitcoin", "ethereum", "solana"]) -> dict:
         "vs_currencies": "usd,uah",
         "include_24hr_change": "true",
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
+    r = await _get_client().get(url, params=params)
+    r.raise_for_status()
     return r.json()
 
 
 async def fetch_trending_crypto() -> list:
     """Топ трендових монет на CoinGecko прямо зараз."""
     url = f"{COINGECKO_URL}/search/trending"
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url)
-        r.raise_for_status()
+    r = await _get_client().get(url)
+    r.raise_for_status()
     coins = r.json().get("coins", [])
     return [c["item"]["name"] for c in coins[:5]]
 
@@ -49,50 +69,14 @@ async def fetch_trending_crypto() -> list:
 
 async def fetch_nbu_rates(currencies: list = ["USD", "EUR", "PLN"]) -> dict:
     """Повертає офіційний курс НБУ для вказаних валют."""
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(NBU_URL, params={"json": ""})
-        r.raise_for_status()
+    r = await _get_client().get(NBU_URL, params={"json": ""})
+    r.raise_for_status()
     all_rates = r.json()
     return {
         item["cc"]: item["rate"]
         for item in all_rates
         if item["cc"] in currencies
     }
-
-
-# ─────────────────────────────────────────
-# ALPHA VANTAGE — акції
-# ─────────────────────────────────────────
-
-async def fetch_stock(symbol: str) -> dict:
-    """Повертає поточну ціну і % зміну акції."""
-    url = "https://www.alphavantage.co/query"
-    params = {
-        "function": "GLOBAL_QUOTE",
-        "symbol": symbol,
-        "apikey": ALPHA_VANTAGE_KEY,
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-    quote = r.json().get("Global Quote", {})
-    return {
-        "symbol": symbol,
-        "price": quote.get("05. price", "N/A"),
-        "change_percent": quote.get("10. change percent", "N/A"),
-    }
-
-
-async def fetch_stocks(symbols: list = ["AAPL", "TSLA", "GOOGL", "NVDA"]) -> list:
-    """Повертає дані для списку акцій."""
-    results = []
-    for symbol in symbols:
-        try:
-            data = await fetch_stock(symbol)
-            results.append(data)
-        except Exception:
-            pass
-    return results
 
 
 # ─────────────────────────────────────────
@@ -111,9 +95,8 @@ async def fetch_fred(series_id: str, api_key: str) -> dict:
         "sort_order": "desc",
         "limit": 1,
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(FRED_URL, params=params)
-        r.raise_for_status()
+    r = await _get_client().get(FRED_URL, params=params)
+    r.raise_for_status()
     observations = r.json().get("observations", [])
     if observations:
         return {"series_id": series_id, "value": observations[0]["value"], "date": observations[0]["date"]}
@@ -128,9 +111,8 @@ async def fetch_world_bank_gdp(country_code: str = "UA") -> dict:
     """Повертає останній ВВП країни."""
     url = f"{WORLD_BANK_URL}/country/{country_code}/indicator/NY.GDP.MKTP.CD"
     params = {"format": "json", "per_page": 1, "mrv": 1}
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
+    r = await _get_client().get(url, params=params)
+    r.raise_for_status()
     data = r.json()
     if len(data) > 1 and data[1]:
         item = data[1][0]
@@ -151,11 +133,10 @@ async def fetch_news(query: str = "AI technology finance", language: str = "en",
         "sortBy": "publishedAt",
         "pageSize": page_size,
         "apiKey": NEWSAPI_KEY,
-        "from": (datetime.now() - timedelta(hours=6)).isoformat(),
+        "from": (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
+    r = await _get_client().get(url, params=params)
+    r.raise_for_status()
     articles = r.json().get("articles", [])
     return [
         {
@@ -191,7 +172,9 @@ async def fetch_all_rss(limit_per_feed: int = 3) -> list:
     all_items = []
     for feed_url in RSS_FEEDS:
         try:
-            items = fetch_rss(feed_url, limit=limit_per_feed)
+            # feedparser блокуючий (мережа + парсинг) — виносимо в потік,
+            # щоб не зупиняти event loop на кожній стрічці.
+            items = await asyncio.to_thread(fetch_rss, feed_url, limit_per_feed)
             all_items.extend(items)
         except Exception:
             pass
@@ -212,9 +195,8 @@ async def fetch_github_trending(topic: str = "artificial-intelligence") -> list:
         "per_page": 5,
     }
     headers = {"Accept": "application/vnd.github+json"}
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(GITHUB_API_URL, params=params, headers=headers)
-        r.raise_for_status()
+    r = await _get_client().get(GITHUB_API_URL, params=params, headers=headers)
+    r.raise_for_status()
     items = r.json().get("items", [])
     return [
         {
@@ -236,13 +218,15 @@ async def fetch_youtube_videos(
     query: str,
     max_results: int = 10,
     published_after_hours: int = 48,
+    min_views: int | None = None,
 ) -> list:
     """
     Шукає свіжі короткі відео на YouTube.
-    Фільтрує по мінімальній кількості переглядів.
+    Фільтрує по мінімальній кількості переглядів (min_views, за замовч. YOUTUBE_MIN_VIEWS).
     """
+    views_threshold = YOUTUBE_MIN_VIEWS if min_views is None else min_views
     published_after = (
-        datetime.utcnow() - timedelta(hours=published_after_hours)
+        datetime.now(timezone.utc) - timedelta(hours=published_after_hours)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     search_url = "https://www.googleapis.com/youtube/v3/search"
@@ -257,10 +241,9 @@ async def fetch_youtube_videos(
         "key": YOUTUBE_API_KEY,
     }
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(search_url, params=search_params)
-        r.raise_for_status()
-        search_data = r.json()
+    r = await _get_client().get(search_url, params=search_params)
+    r.raise_for_status()
+    search_data = r.json()
 
     video_ids = [item["id"]["videoId"] for item in search_data.get("items", [])]
     if not video_ids:
@@ -273,15 +256,14 @@ async def fetch_youtube_videos(
         "id": ",".join(video_ids),
         "key": YOUTUBE_API_KEY,
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(stats_url, params=stats_params)
-        r.raise_for_status()
-        stats_data = r.json()
+    r = await _get_client().get(stats_url, params=stats_params)
+    r.raise_for_status()
+    stats_data = r.json()
 
     videos = []
     for item in stats_data.get("items", []):
         views = int(item["statistics"].get("viewCount", 0))
-        if views >= YOUTUBE_MIN_VIEWS:
+        if views >= views_threshold:
             videos.append({
                 "video_id": item["id"],
                 "title": item["snippet"]["title"],
@@ -300,13 +282,12 @@ async def fetch_youtube_videos(
 # ─────────────────────────────────────────
 
 async def fetch_reddit(subreddit: str = "technology", limit: int = 5) -> list:
-    """Повертає топ постів з суbreddit без авторизації."""
+    """Повертає топ постів із subreddit без авторизації."""
     url = f"https://www.reddit.com/r/{subreddit}/hot.json"
     headers = {"User-Agent": "FinProBot/1.0"}
     params = {"limit": limit}
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(url, headers=headers, params=params)
-        r.raise_for_status()
+    r = await _get_client().get(url, headers=headers, params=params)
+    r.raise_for_status()
     posts = r.json()["data"]["children"]
     return [
         {

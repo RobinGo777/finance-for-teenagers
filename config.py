@@ -1,5 +1,8 @@
 import os
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─────────────────────────────────────────
 # TELEGRAM
@@ -12,7 +15,19 @@ MODERATOR_CHAT_ID    = int(os.getenv("MODERATOR_CHAT_ID", "0"))  # твій Tele
 # GEMINI API
 # ─────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL   = "gemini-1.5-flash"
+GEMINI_MODELS = [
+    model.strip().removeprefix("models/")
+    for model in os.getenv(
+        "GEMINI_MODELS",
+        (
+            "gemini-3.5-flash,"
+            "gemini-3.1-pro-preview,"
+            "gemini-2.5-pro,"
+            "gemini-2.5-flash"
+        ),
+    ).split(",")
+    if model.strip()
+] or ["gemini-3.5-flash"]
 
 # ─────────────────────────────────────────
 # UPSTASH REDIS
@@ -25,7 +40,9 @@ UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN", "")
 # ─────────────────────────────────────────
 YOUTUBE_API_KEY      = os.getenv("YOUTUBE_API_KEY", "")
 NEWSAPI_KEY          = os.getenv("NEWSAPI_KEY", "")
-ALPHA_VANTAGE_KEY    = os.getenv("ALPHA_VANTAGE_KEY", "")
+PEXELS_API_KEY       = os.getenv("PEXELS_API_KEY", "")
+UNSPLASH_ACCESS_KEY  = os.getenv("UNSPLASH_ACCESS_KEY", "")
+STOCK_PHOTO_PROVIDER = os.getenv("STOCK_PHOTO_PROVIDER", "auto").lower()
 
 # Безкоштовні — ключі не потрібні
 COINGECKO_URL        = "https://api.coingecko.com/api/v3"
@@ -94,13 +111,13 @@ VISUAL_TEMPLATES = [
 # РОЗКЛАД ПУБЛІКАЦІЙ
 # ─────────────────────────────────────────
 SCHEDULE = {
-    "monday":    {"time": "18:00", "rubrics": ["ai_news", "trends", "digit_of_week"]},
-    "tuesday":   {"time": "18:30", "rubrics": ["stocks", "video", "ai_hack"]},
-    "wednesday": {"time": "19:00", "rubrics": ["business", "crime"]},
+    "monday":    {"time": "18:00", "rubrics": ["ai_news", "game_economy"]},
+    "tuesday":   {"time": "18:30", "rubrics": ["cost_of_life", "video", "ai_hack"]},
+    "wednesday": {"time": "19:00", "rubrics": ["side_hustle", "crime"]},
     "thursday":  {"time": "18:00", "rubrics": ["crypto", "video", "ai_hack"]},
-    "friday":    {"time": "17:45", "rubrics": ["fin_literacy", "quiz"]},
+    "friday":    {"time": "17:45", "rubrics": ["subscription_trap", "quiz"]},
     "saturday":  {"time": "12:00", "rubrics": ["money_hack", "careers"]},
-    "sunday":    {"time": "19:00", "rubrics": ["digest", "quiz"]},
+    "sunday":    {"time": "19:00", "rubrics": ["money_myth", "quiz"]},
 }
 
 # Рандомний зсув часу публікації (хвилини)
@@ -114,10 +131,59 @@ MONITOR_INTERVAL_HOURS = 2          # перевірка кожні 2 год
 MONITOR_QUIET_START    = 0          # тиша з 00:00
 MONITOR_QUIET_END      = 7          # до 07:00
 MONITOR_MAX_PER_DAY    = 4          # макс реалтайм постів на день
-YOUTUBE_MIN_VIEWS      = 50_000     # мінімум переглядів для відео
+YOUTUBE_MIN_VIEWS      = 20_000     # мінімум переглядів для відео (пом'якшено)
+
+# ─────────────────────────────────────────
+# ФІЛЬТРИ ВІДЕО-РУБРИКИ
+# ─────────────────────────────────────────
+# Фільтри навмисно м'які: краще показати трохи менш «ідеальне» відео,
+# ніж не показати нічого. Прогресивне послаблення в generators/video.py.
+VIDEO_PUBLISHED_AFTER_HOURS = 96      # шукаємо відео за останні 4 дні
+VIDEO_MIN_VIEWS_FLOOR       = 5_000   # абсолютний мінімум для fallback
+VIDEO_MATCH_BONUS_ONLY      = True    # збіг зі свіжими новинами = бонус, не фільтр
+
+TRUSTED_VIDEO_CHANNEL_HINTS = [
+    "techcrunch",
+    "wired",
+    "the verge",
+    "cnet",
+    "mashable",
+    "new scientist",
+    "nasa",
+    "mit",
+    "stanford",
+    "openai",
+    "google",
+    "microsoft",
+    "nvidia",
+    "boston dynamics",
+]
+
+VIDEO_CLICKBAIT_TERMS = [
+    "giveaway",
+    "free money",
+    "guaranteed profit",
+    "casino",
+    "betting",
+    "shocking",
+    "you won't believe",
+    "100x",
+    "pump",
+    "get rich quick",
+]
+
+VIDEO_MATCH_STOPWORDS = [
+    "the", "and", "for", "with", "this", "that", "from", "into", "about",
+    "нове", "новий", "нова", "про", "для", "цей", "ця", "що", "як", "та",
+    "video", "shorts", "short", "news", "today",
+]
 
 # ─────────────────────────────────────────
 # ЗАГАЛЬНІ НАЛАШТУВАННЯ
 # ─────────────────────────────────────────
 TIMEZONE = "Europe/Kyiv"
 MAX_USED_TOPICS_IN_PROMPT = 30      # скільки використаних тем передаємо в промпт
+
+# Через скільки годин після квізу публікувати відповідь зі статистикою.
+# Крон перевіряє щодня о 19:10 і публікує лише «дозрілі» квізи.
+QUIZ_ANSWER_DELAY_HOURS = 20

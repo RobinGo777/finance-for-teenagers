@@ -1,5 +1,6 @@
 import random
 import asyncio
+import logging
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -10,42 +11,46 @@ from config import (
     SCHEDULE_RANDOM_OFFSET_MIN,
     SCHEDULE_RANDOM_OFFSET_MAX,
     TIMEZONE,
+    QUIZ_ANSWER_DELAY_HOURS,
 )
 from data.redis_client import get as redis_get
-from bot.publisher import publish
+from bot.publisher import publish, notify_moderator
 
 # Імпорти всіх генераторів
 from generators.ai_news import generate_ai_news
 from generators.ai_hack import generate_ai_hack
-from generators.stocks import generate_stocks
+from generators.video import generate_video
 from generators.crypto import generate_crypto
 from generators.crime import generate_crime
 from generators.careers import generate_careers
 from generators.cyber import generate_cyber
-from generators.business import generate_business
-from generators.fin_literacy import generate_fin_literacy
 from generators.money_hack import generate_money_hack
 from generators.quiz import generate_quiz
-from generators.trends import generate_trends
-from generators.digest import generate_digest
+from generators.cost_of_life import generate_cost_of_life
+from generators.side_hustle import generate_side_hustle
+from generators.game_economy import generate_game_economy
+from generators.subscription_trap import generate_subscription_trap
+from generators.money_myth import generate_money_myth
 
 KYIV = pytz.timezone(TIMEZONE)
+logger = logging.getLogger(__name__)
 
 # Маппінг назв рубрик → функції генераторів
 GENERATORS = {
     "ai_news":       generate_ai_news,
     "ai_hack":       generate_ai_hack,
-    "stocks":        generate_stocks,
+    "video":         generate_video,
     "crypto":        generate_crypto,
     "crime":         generate_crime,
     "careers":       generate_careers,
     "cyber":         generate_cyber,
-    "business":      generate_business,
-    "fin_literacy":  generate_fin_literacy,
     "money_hack":    generate_money_hack,
     "quiz":          generate_quiz,
-    "trends":        generate_trends,
-    "digest":        generate_digest,
+    "cost_of_life":  generate_cost_of_life,
+    "side_hustle":   generate_side_hustle,
+    "game_economy":  generate_game_economy,
+    "subscription_trap": generate_subscription_trap,
+    "money_myth":    generate_money_myth,
 }
 
 
@@ -69,8 +74,11 @@ async def publish_rubric(rubric_key: str) -> None:
         post_data = await generator()
         if post_data:
             await publish(post_data)
+        else:
+            logger.info("[scheduler] Рубрика %s не дала контенту цього разу", rubric_key)
     except Exception as e:
-        print(f"[scheduler] Помилка генерації {rubric_key}: {e}")
+        logger.exception("[scheduler] Помилка генерації %s: %s", rubric_key, e)
+        await notify_moderator(f"⚠️ Збій генерації рубрики «{rubric_key}»: {e}")
 
 
 # ─────────────────────────────────────────
@@ -195,19 +203,38 @@ def setup_scheduler() -> AsyncIOScheduler:
 
 async def check_and_publish_quiz_answers() -> None:
     """
-    Перевіряє чи є pending квізи і публікує відповіді.
-    Запускається щодня о 19:10.
+    Публікує відповіді на «дозрілі» квізи (старші за QUIZ_ANSWER_DELAY_HOURS)
+    разом зі статистикою голосів. Запускається щодня о 19:10.
     """
-    from data.redis_client import lrange, lrem
+    import time
+    from data.redis_client import (
+        lrange,
+        lrem,
+        get_quiz_pending,
+        get_quiz_results,
+    )
     from bot.publisher import publish_quiz_answer
 
-    # Шукаємо всі ключі quiz:pending:*
-    # Upstash не підтримує KEYS, тому зберігаємо poll_id в окремому списку
+    # Upstash не підтримує KEYS, тому poll_id зберігаємо в окремому списку.
     pending_ids_raw = await lrange("quiz:pending_ids", 0, -1)
+    min_age = QUIZ_ANSWER_DELAY_HOURS * 3600
 
     for poll_id in pending_ids_raw:
         try:
-            await publish_quiz_answer(poll_id, {})
+            pending = await get_quiz_pending(poll_id)
+            if not pending:
+                # Дані зникли (TTL) — прибираємо «висячий» id.
+                await lrem("quiz:pending_ids", 1, poll_id)
+                continue
+
+            # Ще не дозрів — залишаємо на наступний запуск крону.
+            age = time.time() - pending.get("created_at", 0)
+            if age < min_age:
+                continue
+
+            results = await get_quiz_results(poll_id)
+            await publish_quiz_answer(poll_id, results)  # сам очистить pending+голоси
             await lrem("quiz:pending_ids", 1, poll_id)
         except Exception as e:
-            print(f"[scheduler] Помилка публікації відповіді квізу {poll_id}: {e}")
+            logger.exception("[scheduler] Помилка публікації відповіді квізу %s: %s", poll_id, e)
+            await notify_moderator(f"⚠️ Збій публікації відповіді квізу: {e}")

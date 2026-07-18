@@ -1,6 +1,9 @@
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 import base64
+import html
+import logging
+import time
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, MODERATOR_CHAT_ID
 from data.redis_client import (
     get_autopilot,
@@ -9,7 +12,200 @@ from data.redis_client import (
     clear_quiz_pending,
 )
 
+logger = logging.getLogger(__name__)
+
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+
+async def notify_moderator(text: str) -> None:
+    """Надсилає модератору службове повідомлення (алерт про збій тощо).
+
+    Ковтає власні помилки — алерт ніколи не повинен ламати основний потік.
+    """
+    try:
+        await bot.send_message(
+            chat_id=MODERATOR_CHAT_ID,
+            text=_prepare_html(text, MESSAGE_LIMIT),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.exception("[publisher] Не вдалося надіслати алерт модератору")
+
+# ─────────────────────────────────────────
+# ЛІМІТИ TELEGRAM
+# ─────────────────────────────────────────
+CAPTION_LIMIT   = 1024   # підпис до фото
+MESSAGE_LIMIT   = 4096   # звичайне повідомлення
+POLL_QUESTION_LIMIT = 300
+POLL_OPTION_LIMIT   = 100
+
+
+def _prepare_html(text: str, limit: int) -> str:
+    """Обрізає текст до ліміту і екранує спецсимволи для parse_mode=HTML.
+
+    Текст від Gemini — звичайний (без розмітки), тож символи <, >, & треба
+    екранувати, інакше Telegram відхилить повідомлення з помилкою парсингу.
+    Ліміт рахуємо після екранування і ніколи не розриваємо HTML-сутність.
+    """
+    raw = (text or "").strip()
+    escaped = html.escape(raw, quote=False)
+    if len(escaped) <= limit:
+        return escaped
+
+    suffix = "…"
+    parts: list[str] = []
+    used = 0
+    for char in raw:
+        token = html.escape(char, quote=False)
+        if used + len(token) + len(suffix) > limit:
+            break
+        parts.append(token)
+        used += len(token)
+    return "".join(parts).rstrip() + suffix
+
+
+def _clean_poll_question(text: str) -> str:
+    return (text or "").strip()[:POLL_QUESTION_LIMIT]
+
+
+def _clean_poll_options(options: list) -> list:
+    """Приводить варіанти до вимог Telegram: 2–10 штук, кожен ≤100 символів."""
+    cleaned = [str(o).strip()[:POLL_OPTION_LIMIT] for o in (options or []) if str(o).strip()]
+    return cleaned[:10]
+
+
+def _split_message(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
+    """Ділить довгий текст на Telegram-повідомлення, намагаючись різати по абзацах."""
+    remaining = (text or "").strip()
+    chunks: list[str] = []
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = limit
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+    return chunks
+
+
+def _split_caption(text: str, first_limit: int = 1000) -> tuple[str, list[str]]:
+    """Ділить текст на підпис до фото (≤first_limit) і решту як окремі повідомлення.
+
+    Так довгі пости не втрачають кінцівку (CTA/дисклеймер), яку раніше
+    обрізав ліміт підпису 1024. first_limit < 1024 — буфер під HTML-екранування.
+    """
+    chunks = _split_message(text, MESSAGE_LIMIT)
+    if not chunks:
+        return "", []
+    first = chunks[0]
+    if len(first) <= first_limit:
+        return first, chunks[1:]
+    head = _split_message(first, first_limit)
+    return head[0], head[1:] + chunks[1:]
+
+
+async def _send_photo_with_text(chat_id, photo, text: str) -> int:
+    """Надсилає фото з підписом; надлишок тексту — окремими повідомленнями."""
+    caption, rest = _split_caption(text)
+    msg = await bot.send_photo(
+        chat_id=chat_id,
+        photo=photo,
+        caption=_prepare_html(caption, CAPTION_LIMIT),
+        parse_mode="HTML",
+    )
+    for chunk in rest:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=_prepare_html(chunk, MESSAGE_LIMIT),
+            parse_mode="HTML",
+        )
+    return msg.message_id
+
+
+def _test_preview_text(post_data: dict) -> str:
+    """Формує повний текст тестового прев'ю для звичайного поста або квізу."""
+    if post_data.get("rubric") != "quiz":
+        text = post_data.get("post", "") or "(генератор не повернув текст поста)"
+        poll_options = _clean_poll_options(post_data.get("poll_options", []))
+        if poll_options:
+            text += "\n\nТестове опитування:\n" + "\n".join(
+                f"{index + 1}. {option}"
+                for index, option in enumerate(poll_options)
+            )
+        return text
+
+    options = _clean_poll_options(post_data.get("options", []))
+    correct_index = post_data.get("correct_index", 0)
+    answer = (
+        options[correct_index]
+        if isinstance(correct_index, int) and 0 <= correct_index < len(options)
+        else "невідомо"
+    )
+    return (
+        f"Питання: {post_data.get('question', '')}\n\n"
+        + "\n".join(f"{index + 1}. {option}" for index, option in enumerate(options))
+        + f"\n\n✅ Правильна відповідь: {answer}\n\n"
+        + post_data.get("lamp_post", "")
+    ).strip()
+
+
+async def send_test_preview(post_data: dict) -> None:
+    """
+    Надсилає безпечне тестове прев'ю лише модератору.
+
+    Нічого не зберігає в Redis і не створює кнопки публікації, тому тест
+    неможливо випадково відправити в канал.
+    """
+    rubric = post_data.get("rubric", "unknown")
+    header = (
+        "🧪 ТЕСТОВЕ ПРЕВ'Ю\n"
+        f"Рубрика: {rubric}\n"
+        f"Тема: {post_data.get('topic', '—')}\n"
+        f"Персона: {post_data.get('persona', '—')}\n"
+        f"Шаблон: {post_data.get('template', '—')}"
+    )
+
+    image = post_data.get("image")
+    image_url = post_data.get("image_url")
+    if image:
+        await bot.send_photo(
+            chat_id=MODERATOR_CHAT_ID,
+            photo=BufferedInputFile(image, filename=f"test-{rubric}.png"),
+            caption=header,
+        )
+    elif image_url:
+        await bot.send_photo(
+            chat_id=MODERATOR_CHAT_ID,
+            photo=image_url,
+            caption=header,
+        )
+    else:
+        await bot.send_message(chat_id=MODERATOR_CHAT_ID, text=header)
+
+    for chunk in _split_message(_test_preview_text(post_data)):
+        await bot.send_message(chat_id=MODERATOR_CHAT_ID, text=chunk)
+
+    if rubric == "quiz":
+        question = _clean_poll_question(post_data.get("question", ""))
+        options = _clean_poll_options(post_data.get("options", []))
+        if question and len(options) >= 2:
+            await bot.send_poll(
+                chat_id=MODERATOR_CHAT_ID,
+                question=f"🧪 {question}"[:POLL_QUESTION_LIMIT],
+                options=options,
+                is_anonymous=True,
+            )
+    elif post_data.get("poll_options"):
+        options = _clean_poll_options(post_data.get("poll_options", []))
+        if len(options) >= 2:
+            await bot.send_poll(
+                chat_id=MODERATOR_CHAT_ID,
+                question="🧪 Який факт — брехня шахрая?",
+                options=options,
+                is_anonymous=True,
+            )
 
 # ─────────────────────────────────────────
 # ГОЛОВНА ФУНКЦІЯ ПУБЛІКАЦІЇ
@@ -57,28 +253,16 @@ async def publish_to_channel(post_data: dict) -> int | None:
     # ── Пост з картинкою (Pillow bytes) ──
     if image:
         photo = BufferedInputFile(image, filename="post.png")
-        msg = await bot.send_photo(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            photo=photo,
-            caption=text,
-            parse_mode="HTML",
-        )
-        return msg.message_id
+        return await _send_photo_with_text(TELEGRAM_CHANNEL_ID, photo, text)
 
     # ── Пост з YouTube thumbnail ──
     if image_url:
-        msg = await bot.send_photo(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            photo=image_url,
-            caption=text,
-            parse_mode="HTML",
-        )
-        return msg.message_id
+        return await _send_photo_with_text(TELEGRAM_CHANNEL_ID, image_url, text)
 
     # ── Текстовий пост ──
     msg = await bot.send_message(
         chat_id=TELEGRAM_CHANNEL_ID,
-        text=text,
+        text=_prepare_html(text, MESSAGE_LIMIT),
         parse_mode="HTML",
     )
     return msg.message_id
@@ -87,6 +271,13 @@ async def publish_to_channel(post_data: dict) -> int | None:
 async def _publish_quiz(post_data: dict) -> int | None:
     """Публікує квіз як Telegram Poll + зберігає дані для відповіді через 24 год."""
 
+    question = _clean_poll_question(post_data.get("question", ""))
+    options  = _clean_poll_options(post_data.get("options", []))
+
+    # Telegram вимагає щонайменше 2 варіанти
+    if len(options) < 2:
+        return None
+
     # Спочатку картинка
     image = post_data.get("image")
     if image:
@@ -94,23 +285,26 @@ async def _publish_quiz(post_data: dict) -> int | None:
         await bot.send_photo(
             chat_id=TELEGRAM_CHANNEL_ID,
             photo=photo,
-            caption=f"🎮 #ФінКвіз\n\n{post_data.get('question', '')}",
+            caption=_prepare_html(f"🎮 #ФінКвіз\n\n{post_data.get('question', '')}", CAPTION_LIMIT),
+            parse_mode="HTML",
         )
 
     # Потім опитування
     msg = await bot.send_poll(
         chat_id=TELEGRAM_CHANNEL_ID,
-        question=post_data.get("question", ""),
-        options=post_data.get("options", []),
+        question=question,
+        options=options,
         is_anonymous=False,
         allows_multiple_answers=False,
     )
 
-    # Зберігаємо в Redis для відповіді через 24 год
+    # Зберігаємо в Redis для відповіді через ~24 год.
+    # created_at потрібен, щоб крон публікував відповідь лише коли квіз «дозрів».
     await save_quiz_pending(msg.poll.id, {
         "correct_index": post_data.get("correct_index", 0),
         "lamp_post": post_data.get("lamp_post", ""),
         "message_id": msg.message_id,
+        "created_at": time.time(),
     })
     await add_quiz_pending_id(msg.poll.id)
 
@@ -123,21 +317,29 @@ async def _publish_with_poll(post_data: dict) -> int | None:
     image = post_data.get("image")
     text  = post_data.get("post", "")
 
+    options = _clean_poll_options(post_data.get("poll_options", []))
+    if len(options) < 2:
+        # Без валідного опитування публікуємо просто як пост з картинкою
+        if image:
+            photo = BufferedInputFile(image, filename="post.png")
+            return await _send_photo_with_text(TELEGRAM_CHANNEL_ID, photo, text)
+        msg = await bot.send_message(
+            chat_id=TELEGRAM_CHANNEL_ID,
+            text=_prepare_html(text, MESSAGE_LIMIT),
+            parse_mode="HTML",
+        )
+        return msg.message_id
+
     # Пост з картинкою
     if image:
         photo = BufferedInputFile(image, filename="post.png")
-        await bot.send_photo(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            photo=photo,
-            caption=text,
-            parse_mode="HTML",
-        )
+        await _send_photo_with_text(TELEGRAM_CHANNEL_ID, photo, text)
 
     # Опитування під постом
     msg = await bot.send_poll(
         chat_id=TELEGRAM_CHANNEL_ID,
-        question="Який факт — брехня шахрая?",
-        options=post_data.get("poll_options", []),
+        question=_clean_poll_question("Який факт — брехня шахрая?"),
+        options=options,
         is_anonymous=False,
     )
 
@@ -152,7 +354,7 @@ async def publish_quiz_answer(poll_id: str, poll_results: dict) -> None:
     if lamp_post:
         await bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,
-            text=lamp_post,
+            text=_prepare_html(lamp_post, MESSAGE_LIMIT),
             parse_mode="HTML",
         )
         await clear_quiz_pending(poll_id)
@@ -168,7 +370,7 @@ async def send_to_moderator(post_data: dict) -> None:
     Три кнопки: ✅ Опублікувати / ✏️ Редагувати / ❌ Скасувати
     """
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    from data.redis_client import set as redis_set
+    from data.redis_client import set_value as redis_set
     import json
     import time
 

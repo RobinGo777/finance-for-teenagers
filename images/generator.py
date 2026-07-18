@@ -1,7 +1,16 @@
+import asyncio
 import io
+import logging
+import re
 import textwrap
+import httpx
 from PIL import Image, ImageDraw, ImageFont
-from config import VISUAL_TEMPLATES
+from config import (
+    VISUAL_TEMPLATES,
+    PEXELS_API_KEY,
+    UNSPLASH_ACCESS_KEY,
+    STOCK_PHOTO_PROVIDER,
+)
 
 
 # ─────────────────────────────────────────
@@ -12,6 +21,29 @@ IMG_WIDTH  = 1280
 IMG_HEIGHT = 720
 FONT_PATH  = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_PATH_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+logger = logging.getLogger(__name__)
+
+
+# Діапазони символів, які базовий DejaVu не рендерить (emoji, піктограми).
+# На картинці вони перетворюються на «тофу»-квадрати, тож прибираємо їх.
+_UNRENDERABLE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"   # емодзі та піктограми
+    "\U00002600-\U000027BF"   # різні символи + dingbats
+    "\U00002B00-\U00002BFF"   # стрілки/зірки
+    "\U0001F1E6-\U0001F1FF"   # регіональні індикатори
+    "\U0000FE00-\U0000FE0F"   # variation selectors
+    "\U0000200D"              # zero-width joiner
+    "\U000020BF"              # символ біткоїна ₿
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _strip_unrenderable(text: str) -> str:
+    """Прибирає emoji/піктограми, які шрифт картинки не вміє малювати."""
+    cleaned = _UNRENDERABLE.sub("", text or "")
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
 def _hex_to_rgb(hex_color: str) -> tuple:
@@ -24,6 +56,144 @@ def _load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
         return ImageFont.truetype(path, size)
     except OSError:
         return ImageFont.load_default()
+
+
+def _normalize_query(text: str) -> str:
+    clean = re.sub(r"[^\w\s-]", " ", text, flags=re.UNICODE)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean[:80]
+
+
+def _photo_queries(title: str, body: str, rubric: str) -> list[str]:
+    queries = []
+    base = f"{title} {rubric}".strip()
+    if base:
+        queries.append(_normalize_query(base))
+    if body:
+        queries.append(_normalize_query(body))
+    queries.extend(
+        [
+            "finance business technology",
+            "money investment economics",
+            "startup office data chart",
+        ]
+    )
+    return [q for q in queries if q]
+
+
+def _fetch_pexels_url(client: httpx.Client, query: str) -> str | None:
+    if not PEXELS_API_KEY:
+        return None
+    try:
+        resp = client.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": PEXELS_API_KEY},
+            params={"query": query, "per_page": 1, "orientation": "landscape"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        photos = data.get("photos", [])
+        if not photos:
+            return None
+        src = photos[0].get("src", {})
+        return src.get("large2x") or src.get("large") or src.get("original")
+    except Exception as exc:
+        logger.warning("Pexels search failed: %s", exc)
+        return None
+
+
+def _fetch_unsplash_url(client: httpx.Client, query: str) -> str | None:
+    if not UNSPLASH_ACCESS_KEY:
+        return None
+    try:
+        resp = client.get(
+            "https://api.unsplash.com/search/photos",
+            params={
+                "query": query,
+                "page": 1,
+                "per_page": 1,
+                "orientation": "landscape",
+                "client_id": UNSPLASH_ACCESS_KEY,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            return None
+        urls = results[0].get("urls", {})
+        return urls.get("regular") or urls.get("full")
+    except Exception as exc:
+        logger.warning("Unsplash search failed: %s", exc)
+        return None
+
+
+def _build_stock_photo(
+    title: str,
+    body: str,
+    rubric: str,
+    persona_name: str,
+    template: dict,
+) -> bytes | None:
+    providers: list[str]
+    if STOCK_PHOTO_PROVIDER == "pexels":
+        providers = ["pexels"]
+    elif STOCK_PHOTO_PROVIDER == "unsplash":
+        providers = ["unsplash"]
+    else:
+        providers = ["pexels", "unsplash"]
+
+    queries = _photo_queries(title, body, rubric)
+    if not queries:
+        return None
+
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            photo_url = None
+            for query in queries:
+                for provider in providers:
+                    if provider == "pexels":
+                        photo_url = _fetch_pexels_url(client, query)
+                    else:
+                        photo_url = _fetch_unsplash_url(client, query)
+                    if photo_url:
+                        break
+                if photo_url:
+                    break
+
+            if not photo_url:
+                return None
+
+            image_resp = client.get(photo_url)
+            image_resp.raise_for_status()
+
+            img = Image.open(io.BytesIO(image_resp.content)).convert("RGB")
+            img = img.resize((IMG_WIDTH, IMG_HEIGHT), Image.Resampling.LANCZOS)
+
+            draw = ImageDraw.Draw(img)
+            accent_color = _hex_to_rgb(template["accent"])
+            white = (255, 255, 255)
+
+            # Overlay for readability on bright photos.
+            overlay_top = Image.new("RGBA", (IMG_WIDTH, IMG_HEIGHT), (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay_top)
+            overlay_draw.rectangle([(0, IMG_HEIGHT - 220), (IMG_WIDTH, IMG_HEIGHT)], fill=(0, 0, 0, 130))
+            img = Image.alpha_composite(img.convert("RGBA"), overlay_top).convert("RGB")
+            draw = ImageDraw.Draw(img)
+
+            font_rubric = _load_font(FONT_PATH, 28)
+            font_title = _load_font(FONT_PATH, 58)
+            font_persona = _load_font(FONT_PATH_REGULAR, 24)
+
+            draw.rectangle([(0, 0), (8, IMG_HEIGHT)], fill=accent_color)
+            draw.text((48, 42), _strip_unrenderable(rubric).upper(), font=font_rubric, fill=accent_color)
+            draw.text((48, IMG_HEIGHT - 190), textwrap.fill(_strip_unrenderable(title), width=34), font=font_title, fill=white)
+            draw.text((48, IMG_HEIGHT - 52), f"автор: {_strip_unrenderable(persona_name)}", font=font_persona, fill=accent_color)
+
+            return _save_image(img)
+    except Exception as exc:
+        logger.warning("Stock photo pipeline failed: %s", exc)
+        return None
 
 
 # ─────────────────────────────────────────
@@ -41,6 +211,16 @@ def generate_post_image(
     Генерує картинку для поста через Pillow.
     Повертає PNG у вигляді bytes.
     """
+    stock_photo = _build_stock_photo(
+        title=title,
+        body=body,
+        rubric=rubric,
+        persona_name=persona_name,
+        template=template,
+    )
+    if stock_photo:
+        return stock_photo
+
     bg_color     = _hex_to_rgb(template["bg"])
     accent_color = _hex_to_rgb(template["accent"])
     white        = (255, 255, 255)
@@ -63,14 +243,14 @@ def generate_post_image(
 
     # ── Рубрика (верхній лівий) ──
     font_rubric = _load_font(FONT_PATH, 28)
-    draw.text((48, 48), rubric.upper(), font=font_rubric, fill=accent_color)
+    draw.text((48, 48), _strip_unrenderable(rubric).upper(), font=font_rubric, fill=accent_color)
 
     # ── Лінія під рубрикою ──
     draw.line([(48, 90), (IMG_WIDTH - 48, 90)], fill=(*accent_color, 80), width=1)
 
     # ── Заголовок (великий) ──
     font_title = _load_font(FONT_PATH, 64)
-    wrapped_title = textwrap.fill(title, width=28)
+    wrapped_title = textwrap.fill(_strip_unrenderable(title), width=28)
     draw.text((48, 120), wrapped_title, font=font_title, fill=white)
 
     # ── Підзаголовок / тіло ──
@@ -78,7 +258,7 @@ def generate_post_image(
     body_y = 120 + title_lines * 76 + 20
 
     font_body = _load_font(FONT_PATH_REGULAR, 36)
-    wrapped_body = textwrap.fill(body, width=52)
+    wrapped_body = textwrap.fill(_strip_unrenderable(body), width=52)
     draw.text((48, body_y), wrapped_body, font=font_body, fill=muted)
 
     # ── Нижня панель ──
@@ -91,7 +271,7 @@ def generate_post_image(
     font_persona = _load_font(FONT_PATH, 26)
     draw.text(
         (48, IMG_HEIGHT - 54),
-        f"автор: {persona_name}",
+        f"автор: {_strip_unrenderable(persona_name)}",
         font=font_persona,
         fill=accent_color,
     )
@@ -150,7 +330,7 @@ def generate_chart_image(
     font_value = _load_font(FONT_PATH, 32)
 
     # ── Заголовок ──
-    draw.text((48, 40), title, font=font_title, fill=white)
+    draw.text((48, 40), _strip_unrenderable(title), font=font_title, fill=white)
     draw.line([(48, 100), (IMG_WIDTH - 48, 100)], fill=accent_color, width=2)
 
     # ── Параметри графіку ──
@@ -239,11 +419,11 @@ def generate_quiz_image(question: str, template: dict) -> bytes:
 
     # Заголовок рубрики
     font_rubric = _load_font(FONT_PATH, 36)
-    draw.text((48, 48), "🎮 #ФінКвіз", font=font_rubric, fill=accent_color)
+    draw.text((48, 48), "#ФінКвіз", font=font_rubric, fill=accent_color)
 
     # Велике питання по центру
     font_q = _load_font(FONT_PATH, 54)
-    wrapped = textwrap.fill(question, width=32)
+    wrapped = textwrap.fill(_strip_unrenderable(question), width=32)
     lines   = wrapped.split("\n")
     total_h = len(lines) * 64
     start_y = (IMG_HEIGHT - total_h) // 2 - 20
@@ -260,7 +440,7 @@ def generate_quiz_image(question: str, template: dict) -> bytes:
 
     # Підказка знизу
     font_hint = _load_font(FONT_PATH_REGULAR, 28)
-    hint = "Голосуй нижче 👇"
+    hint = "Голосуй нижче"
     bbox  = draw.textbbox((0, 0), hint, font=font_hint)
     hint_w = bbox[2] - bbox[0]
     draw.text(
@@ -282,3 +462,21 @@ def _save_image(img: Image.Image) -> bytes:
     img.save(buffer, format="PNG", optimize=True)
     buffer.seek(0)
     return buffer.read()
+
+
+# ─────────────────────────────────────────
+# ASYNC-ОБГОРТКИ
+# ─────────────────────────────────────────
+# Малювання Pillow + завантаження стокових фото — блокуючі операції.
+# Виносимо їх у потік, щоб не зупиняти event loop (polling і monitor).
+
+async def generate_post_image_async(**kwargs) -> bytes:
+    return await asyncio.to_thread(generate_post_image, **kwargs)
+
+
+async def generate_quiz_image_async(**kwargs) -> bytes:
+    return await asyncio.to_thread(generate_quiz_image, **kwargs)
+
+
+async def generate_chart_image_async(**kwargs) -> bytes:
+    return await asyncio.to_thread(generate_chart_image, **kwargs)

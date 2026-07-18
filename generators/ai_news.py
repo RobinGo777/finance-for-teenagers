@@ -2,17 +2,22 @@ from datetime import datetime
 from generators.gemini import generate_json, pick_persona, pick_template, build_base_prompt
 from data.redis_client import get_used_topics, save_topic, add_weekly_topic
 from data.fetchers import fetch_all_rss, fetch_news
-from images.generator import generate_post_image
+from images.generator import generate_post_image_async
 
 RUBRIC_KEY     = "ai_news"
 RUBRIC_NAME    = "#ШІ_новини"
 RUBRIC_HASHTAG = "🤖 #ШІ_новини"
 
 
-async def generate_ai_news() -> dict:
+async def generate_ai_news(focus: str | None = None) -> dict:
     """
     Генерує пост для рубрики #ШІ_новини.
     Використовує свіжі RSS + NewsAPI + Gemini web search.
+
+    focus — необов'язковий конкретний матеріал (заголовок новини, назва репо
+    тощо), на якому треба зосередити пост. Використовується реалтайм-монітором,
+    щоб пост був саме про знайдений привід, а не про випадкову тему.
+
     Повертає dict з текстом поста, картинкою і метаданими.
     """
 
@@ -26,6 +31,8 @@ async def generate_ai_news() -> dict:
     all_titles  = rss_titles + news_titles
 
     news_data = "\n".join(f"- {t}" for t in all_titles) if all_titles else "немає даних"
+    if focus:
+        news_data = f"ГОЛОВНИЙ ПРИВІД (пиши саме про це):\n- {focus}\n\nІнші новини:\n{news_data}"
 
     # 2. Вибираємо персону і шаблон
     persona  = pick_persona()
@@ -35,11 +42,18 @@ async def generate_ai_news() -> dict:
     used_topics = await get_used_topics(RUBRIC_KEY)
 
     # 4. Будуємо промпт
-    task = (
-        "Знайди найцікавішу новину про ШІ за сьогодні і напиши пост. "
-        "Обов'язково поясни що це означає конкретно для підлітка або студента. "
-        "Можеш взяти одну з наданих новин або знайти свіжішу через пошук."
-    )
+    if focus:
+        task = (
+            "Напиши пост саме про 'ГОЛОВНИЙ ПРИВІД' з наданих даних. "
+            "Обов'язково поясни що це означає конкретно для підлітка або студента. "
+            "Можеш уточнити деталі через пошук."
+        )
+    else:
+        task = (
+            "Знайди найцікавішу новину про ШІ за сьогодні і напиши пост. "
+            "Обов'язково поясни що це означає конкретно для підлітка або студента. "
+            "Можеш взяти одну з наданих новин або знайти свіжішу через пошук."
+        )
 
     base = build_base_prompt(
         rubric_name=RUBRIC_NAME,
@@ -64,7 +78,7 @@ async def generate_ai_news() -> dict:
     data = await generate_json(prompt, use_search=True)
 
     # 6. Генеруємо картинку
-    image_bytes = generate_post_image(
+    image_bytes = await generate_post_image_async(
         title=data.get("title", RUBRIC_NAME),
         body=data.get("body_preview", ""),
         rubric=RUBRIC_HASHTAG,

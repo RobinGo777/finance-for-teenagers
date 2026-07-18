@@ -1,7 +1,21 @@
+import re
+
+import logging
+
 from generators.gemini import generate_json, pick_persona, build_base_prompt
 from data.redis_client import get_used_topics, save_topic, is_published, mark_published
-from data.fetchers import fetch_youtube_videos
-from config import VISUAL_TEMPLATES
+from data.fetchers import fetch_youtube_videos, fetch_news
+from config import (
+    VISUAL_TEMPLATES,
+    TRUSTED_VIDEO_CHANNEL_HINTS,
+    VIDEO_CLICKBAIT_TERMS,
+    VIDEO_MATCH_STOPWORDS,
+    YOUTUBE_MIN_VIEWS,
+    VIDEO_PUBLISHED_AFTER_HOURS,
+    VIDEO_MIN_VIEWS_FLOOR,
+)
+
+logger = logging.getLogger(__name__)
 
 RUBRIC_KEY     = "video"
 RUBRIC_NAME    = "#ВідеоТижня"
@@ -19,12 +33,83 @@ SEARCH_QUERIES = [
     "NASA space exploration 2026",
 ]
 
+MATCH_STOPWORDS = set(VIDEO_MATCH_STOPWORDS)
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _tokenize(text: str) -> set[str]:
+    tokens = re.findall(r"[a-zA-Zа-яА-ЯіїєґІЇЄҐ0-9]+", _normalize_text(text))
+    return {t for t in tokens if len(t) > 2 and t not in MATCH_STOPWORDS}
+
+
+def _has_clickbait(title: str) -> bool:
+    t = _normalize_text(title)
+    return any(term in t for term in VIDEO_CLICKBAIT_TERMS)
+
+
+def _is_trusted_channel(channel: str) -> bool:
+    c = _normalize_text(channel)
+    return any(hint in c for hint in TRUSTED_VIDEO_CHANNEL_HINTS)
+
+
+def _news_match_score(video_title: str, recent_news_titles: list[str]) -> int:
+    """Наскільки відео перегукується зі свіжими новинами (0 = немає збігу).
+
+    Використовується як БОНУС до рейтингу, а не як жорсткий фільтр —
+    інакше майже завжди отримували б 0 відео.
+    """
+    video_tokens = _tokenize(video_title)
+    if not video_tokens:
+        return 0
+    best = 0
+    for news_title in recent_news_titles:
+        overlap = len(video_tokens.intersection(_tokenize(news_title)))
+        best = max(best, overlap)
+    return best
+
+
+async def _collect_videos(min_views: int, hours: int) -> list[dict]:
+    """Збирає та дедуплікує відео по всіх пошукових запитах."""
+    collected: dict[str, dict] = {}
+    for query in SEARCH_QUERIES:
+        try:
+            videos = await fetch_youtube_videos(
+                query=query,
+                max_results=5,
+                published_after_hours=hours,
+                min_views=min_views,
+            )
+            for v in videos:
+                collected[v["video_id"]] = v
+        except Exception:
+            continue
+    return list(collected.values())
+
+
+async def _filter_fresh(videos: list[dict]) -> list[dict]:
+    """Прибирає клікбейт і вже опубліковані відео."""
+    result = []
+    for v in videos:
+        if _has_clickbait(v.get("title", "")):
+            continue
+        if await is_published(v["video_id"]):
+            continue
+        result.append(v)
+    return result
+
 
 async def generate_video() -> dict | None:
     """
     Знаходить свіже топове відео на YouTube і генерує коментар.
     Повертає None якщо нічого цікавого не знайдено.
     Публікується у будь-який час коли знайдено (не вночі).
+
+    Фільтри навмисно м'які + прогресивне послаблення: спершу нормальний
+    поріг, якщо порожньо — знижуємо перегляди й розширюємо вікно дат.
+    Збіг зі свіжими новинами — лише бонус до рейтингу, не фільтр.
     """
 
     persona     = pick_persona()
@@ -33,33 +118,44 @@ async def generate_video() -> dict | None:
     # Organic Growth шаблон для відео
     template = next((t for t in VISUAL_TEMPLATES if t["name"] == "Organic Growth"), None)
 
-    # Шукаємо відео по всіх запитах
-    all_videos = []
-    for query in SEARCH_QUERIES:
-        try:
-            videos = await fetch_youtube_videos(
-                query=query,
-                max_results=5,
-                published_after_hours=48,
+    recent_news = await fetch_news(
+        query="technology OR AI OR robotics OR science",
+        language="en",
+        page_size=20,
+    )
+    recent_news_titles = [item.get("title", "") for item in recent_news if item.get("title")]
+
+    # Прогресивне послаблення: (мін. переглядів, вікно годин)
+    attempts = [
+        (YOUTUBE_MIN_VIEWS, VIDEO_PUBLISHED_AFTER_HOURS),
+        (VIDEO_MIN_VIEWS_FLOOR, VIDEO_PUBLISHED_AFTER_HOURS),
+        (VIDEO_MIN_VIEWS_FLOOR, VIDEO_PUBLISHED_AFTER_HOURS * 2),
+    ]
+
+    new_videos: list[dict] = []
+    for min_views, hours in attempts:
+        candidates = await _collect_videos(min_views=min_views, hours=hours)
+        new_videos = await _filter_fresh(candidates)
+        if new_videos:
+            logger.info(
+                "[video] Знайдено %s відео (min_views=%s, hours=%s)",
+                len(new_videos), min_views, hours,
             )
-            all_videos.extend(videos)
-        except Exception:
-            continue
-
-    if not all_videos:
-        return None
-
-    # Фільтруємо вже опубліковані
-    new_videos = []
-    for v in all_videos:
-        if not await is_published(v["video_id"]):
-            new_videos.append(v)
+            break
 
     if not new_videos:
+        logger.info("[video] Нічого не знайдено навіть після послаблення фільтрів")
         return None
 
-    # Топ 5 по переглядах для промпту
-    top_videos = sorted(new_videos, key=lambda x: x["views"], reverse=True)[:5]
+    # Рейтинг = надійний канал (+3) + релевантність новинам (0..3) + перегляди.
+    def _rank(v: dict) -> tuple:
+        score = 0
+        if _is_trusted_channel(v.get("channel", "")):
+            score += 3
+        score += min(_news_match_score(v.get("title", ""), recent_news_titles), 3)
+        return (score, v["views"])
+
+    top_videos = sorted(new_videos, key=_rank, reverse=True)[:5]
 
     videos_str = "\n".join(
         f"- ID: {v['video_id']} | {v['title']} | {v['channel']} | {v['views']:,} переглядів"

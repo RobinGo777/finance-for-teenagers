@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.git/
+.env
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/
+agent-transcripts/

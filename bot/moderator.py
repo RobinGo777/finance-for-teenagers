@@ -89,9 +89,10 @@ async def _run_test_rubrics(rubrics: list[str]) -> None:
                     text=f"❌ {rubric}: {type(error).__name__}: {error}",
                 )
 
-            # Не надсилаємо багато Telegram/API запитів в одну секунду.
+            # Розтягуємо запити в часі, щоб не впертися в ліміт Gemini (429)
+            # на безкоштовному тарифі під час тесту всіх рубрик поспіль.
             if index < len(rubrics):
-                await asyncio.sleep(2)
+                await asyncio.sleep(7)
     finally:
         summary = (
             "🏁 Тест рубрик завершено\n\n"

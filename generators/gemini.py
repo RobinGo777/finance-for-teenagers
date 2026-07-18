@@ -135,8 +135,34 @@ def _should_retry(error: Exception) -> bool:
     return isinstance(error, (httpx.TimeoutException, httpx.NetworkError))
 
 
-async def _sleep_before_retry(attempt: int) -> None:
-    await asyncio.sleep(RETRY_BASE_DELAY * attempt)
+def _retry_after_seconds(error: Exception | None) -> float | None:
+    """Дістає рекомендовану паузу з відповіді 429 (Retry-After або RetryInfo)."""
+    if not isinstance(error, httpx.HTTPStatusError):
+        return None
+    header = error.response.headers.get("Retry-After")
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    # Gemini кладе паузу в тіло: error.details[].retryDelay = "37s"
+    try:
+        details = error.response.json().get("error", {}).get("details", [])
+        for item in details:
+            delay = item.get("retryDelay", "")
+            if isinstance(delay, str) and delay.endswith("s"):
+                return float(delay[:-1])
+    except Exception:
+        pass
+    return None
+
+
+async def _sleep_before_retry(attempt: int, error: Exception | None = None) -> None:
+    # Поважаємо Retry-After від Gemini (для 429), інакше експоненційний backoff.
+    wait = _retry_after_seconds(error)
+    if wait is None:
+        wait = RETRY_BASE_DELAY * attempt
+    await asyncio.sleep(min(wait, 60))
 
 
 async def generate(prompt: str, use_search: bool = False) -> str:
@@ -170,7 +196,7 @@ async def generate(prompt: str, use_search: bool = False) -> str:
                 last_exc,
             )
             if attempt < MODEL_RETRIES and _should_retry(last_exc):
-                await _sleep_before_retry(attempt)
+                await _sleep_before_retry(attempt, last_exc)
                 continue
             break
 
@@ -254,7 +280,7 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
                 last_exc,
             )
             if attempt < MODEL_RETRIES:
-                await _sleep_before_retry(attempt)
+                await _sleep_before_retry(attempt, last_exc)
 
         logger.warning("JSON fallback: перемикання з моделі %s", model)
 

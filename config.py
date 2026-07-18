@@ -19,15 +19,13 @@ GEMINI_MODELS = [
     model.strip().removeprefix("models/")
     for model in os.getenv(
         "GEMINI_MODELS",
-        (
-            "gemini-3.5-flash,"
-            "gemini-3.1-pro-preview,"
-            "gemini-2.5-pro,"
-            "gemini-2.5-flash"
-        ),
+        # Робочу/дешевшу flash-модель ставимо ПЕРШОЮ: у неї вищі ліміти запитів,
+        # і на кожну рубрику йде 1 виклик, а не перебір неіснуючих моделей
+        # (це швидко вигорало квоту й давало 429). Новіші можна додати через env.
+        "gemini-2.5-flash,gemini-2.5-pro",
     ).split(",")
     if model.strip()
-] or ["gemini-3.5-flash"]
+] or ["gemini-2.5-flash"]
 
 # ─────────────────────────────────────────
 # UPSTASH REDIS

@@ -56,6 +56,12 @@ def get_test_rubrics() -> list[str]:
     return ordered
 
 
+def _is_quota_error(error: Exception) -> bool:
+    """Чи це помилка вичерпаної квоти Gemini (429 / RESOURCE_EXHAUSTED)."""
+    text = str(error)
+    return "429" in text or "Too Many Requests" in text or "RESOURCE_EXHAUSTED" in text
+
+
 async def _run_test_rubrics(rubrics: list[str]) -> None:
     """Послідовно генерує рубрики та надсилає прев'ю тільки модератору."""
     global _test_task
@@ -88,6 +94,18 @@ async def _run_test_rubrics(rubrics: list[str]) -> None:
                     chat_id=MODERATOR_CHAT_ID,
                     text=f"❌ {rubric}: {type(error).__name__}: {error}",
                 )
+                # Якщо вичерпано квоту Gemini — нема сенсу молотити решту рубрик.
+                if _is_quota_error(error):
+                    await bot.send_message(
+                        chat_id=MODERATOR_CHAT_ID,
+                        text=(
+                            "🛑 Досягнуто денний ліміт Gemini (429). Тест зупинено.\n"
+                            "Квота скидається опівночі за тихоокеанським часом "
+                            "(≈10:00 за Києвом). Спробуй пізніше або тестуй по одній "
+                            "рубриці командою /test <рубрика>."
+                        ),
+                    )
+                    break
 
             # Розтягуємо запити в часі, щоб не впертися в ліміт Gemini (429)
             # на безкоштовному тарифі під час тесту всіх рубрик поспіль.

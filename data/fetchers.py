@@ -271,6 +271,7 @@ async def fetch_youtube_videos(
                 "video_id": item["id"],
                 "title": snippet["title"],
                 "channel": snippet["channelTitle"],
+                "description": snippet.get("description", ""),
                 "views": views,
                 "published": snippet["publishedAt"],
                 "thumbnail": snippet["thumbnails"]["high"]["url"],

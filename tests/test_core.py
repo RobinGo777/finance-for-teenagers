@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import date
 from unittest.mock import AsyncMock, patch
 
 from bot.publisher import (
@@ -10,7 +11,12 @@ from bot.publisher import (
     _split_caption,
     CAPTION_LIMIT,
 )
-from generators.video import _news_match_score
+from generators.video import (
+    SEARCH_QUERY_GROUPS,
+    _news_match_score,
+    _queries_for_day,
+    _video_rank,
+)
 from bot.moderator import get_test_rubrics
 from config import SCHEDULE
 from data import redis_client
@@ -60,6 +66,33 @@ class PublisherHelpersTests(unittest.TestCase):
 
 
 class VideoScoringTests(unittest.TestCase):
+    def test_daily_queries_cover_every_category_and_rotate(self) -> None:
+        first_day = _queries_for_day(date(2026, 7, 19))
+        next_day = _queries_for_day(date(2026, 7, 20))
+
+        self.assertEqual(
+            {category for category, _ in first_day},
+            set(SEARCH_QUERY_GROUPS),
+        )
+        self.assertEqual(len(first_day), len(SEARCH_QUERY_GROUPS))
+        self.assertNotEqual(first_day, next_day)
+
+    def test_visual_trusted_video_outranks_talking_news(self) -> None:
+        demo = {
+            "title": "We built and tested a new robot prototype",
+            "description": "Hands-on engineering demo",
+            "channel": "Veritasium",
+            "views": 20_000,
+        }
+        talking_news = {
+            "title": "Prime Minister addresses rocket programme",
+            "description": "Breaking news speech and statement",
+            "channel": "NDTV India",
+            "views": 2_000_000,
+        }
+
+        self.assertGreater(_video_rank(demo, []), _video_rank(talking_news, []))
+
     def test_news_match_is_soft_bonus_not_filter(self) -> None:
         # Збіг зі свіжими новинами додає бонус…
         score = _news_match_score(

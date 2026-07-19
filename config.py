@@ -137,8 +137,8 @@ YOUTUBE_MIN_VIEWS      = 20_000     # мінімум переглядів для
 # ─────────────────────────────────────────
 # ФІЛЬТРИ ВІДЕО-РУБРИКИ
 # ─────────────────────────────────────────
-# Фільтри навмисно м'які: краще показати трохи менш «ідеальне» відео,
-# ніж не показати нічого. Прогресивне послаблення в generators/video.py.
+# Пошук бере кандидатів із широкого вікна одним проходом, а потім оцінює
+# корисність і видовищність. Модель може відмовитися від слабких кандидатів.
 VIDEO_PUBLISHED_AFTER_HOURS = 96      # шукаємо відео за останні 4 дні
 VIDEO_MIN_VIEWS_FLOOR       = 5_000   # абсолютний мінімум для fallback
 VIDEO_MATCH_BONUS_ONLY      = True    # збіг зі свіжими новинами = бонус, не фільтр
@@ -161,7 +161,6 @@ TRUSTED_VIDEO_CHANNEL_HINTS = [
     "wired",
     "the verge",
     "cnet",
-    "mashable",
     "new scientist",
     "nasa",
     "mit",
@@ -171,6 +170,34 @@ TRUSTED_VIDEO_CHANNEL_HINTS = [
     "microsoft",
     "nvidia",
     "boston dynamics",
+    "veritasium",
+    "kurzgesagt",
+    "mark rober",
+    "stuff made here",
+    "mkbhd",
+    "marques brownlee",
+    "linus tech tips",
+    "two minute papers",
+    "coldfusion",
+    "fireship",
+    "the coding train",
+    "y combinator",
+    "ted-ed",
+    "smartereveryday",
+]
+
+# Ознаки відео, де щось реально показують або доступно пояснюють.
+VIDEO_ENGAGING_TERMS = [
+    "demo", "demonstration", "tested", "testing", "experiment", "prototype",
+    "review", "hands-on", "explained", "how it works", "inside", "built",
+    "building", "invention", "footage", "launch", "first look", "showcase",
+]
+
+# Ознаки телесюжету/політичного переказу замість корисного відео.
+VIDEO_LOW_VALUE_TERMS = [
+    "breaking news", "speech", "prime minister", "president", "minister",
+    "press conference", "interview", "debate", "statement", "addresses",
+    "reacts to", "exclusive news", "live news",
 ]
 
 VIDEO_CLICKBAIT_TERMS = [

@@ -1,4 +1,5 @@
 from generators.gemini import generate_json, pick_persona, pick_template, build_base_prompt
+from data.fetchers import fetch_news
 from data.redis_client import get_used_topics, save_topic, add_weekly_topic
 from images.generator import generate_post_image_async
 
@@ -21,8 +22,23 @@ async def generate_crime() -> dict:
     from config import VISUAL_TEMPLATES
     template = next((t for t in VISUAL_TEMPLATES if t["name"] == "Warm Alert"), template)
 
+    try:
+        news = await fetch_news(
+            query="financial fraud OR scam OR Ponzi scheme OR cyber fraud",
+            language="en",
+            page_size=8,
+        )
+    except Exception:
+        news = []
+    cases = "\n".join(
+        f"- {item.get('title', '')}: {item.get('description', '')}"
+        for item in news
+        if item.get("title")
+    )
     task = (
-        "Вибери реальну фінансову аферу або скандал (світову або українську). "
+        "Вибери реальну й перевірювану фінансову аферу або скандал (світову "
+        "або українську), бажано зі свіжих заголовків. Не вигадуй імен, дат, "
+        "сум чи судових рішень; якщо точна цифра не підтверджена — не вказуй її. "
         "Розкажи як детектив — інтригуючо, але з практичним висновком для підлітка. "
         "Додай інтерактив: 3 факти, один з яких — брехня шахрая."
     )
@@ -33,6 +49,7 @@ async def generate_crime() -> dict:
         task=task,
         used_topics=used_topics,
         persona=persona,
+        extra_data=f"Свіжі заголовки про шахрайство:\n{cases or 'немає даних'}",
     )
 
     prompt = base + """

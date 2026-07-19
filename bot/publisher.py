@@ -309,7 +309,7 @@ async def _publish_quiz(post_data: dict) -> int | None:
         await bot.send_photo(
             chat_id=TELEGRAM_CHANNEL_ID,
             photo=photo,
-            caption=_prepare_html(f"🎮 #ФінКвіз\n\n{post_data.get('question', '')}", CAPTION_LIMIT),
+            caption=_prepare_html(f"🧠 #ФінКвіз\n\n{post_data.get('question', '')}", CAPTION_LIMIT),
             parse_mode="HTML",
         )
 

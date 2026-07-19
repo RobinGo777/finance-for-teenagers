@@ -115,9 +115,9 @@ SCHEDULE = {
     "monday":    {"time": "18:00", "rubrics": ["ai_news", "game_economy"]},
     "tuesday":   {"time": "18:30", "rubrics": ["cost_of_life", "ai_hack"]},
     "wednesday": {"time": "19:00", "rubrics": ["side_hustle", "crime"]},
-    "thursday":  {"time": "18:00", "rubrics": ["crypto", "ai_hack"]},
+    "thursday":  {"time": "18:00", "rubrics": ["crypto", "behavioral_finance"]},
     "friday":    {"time": "17:45", "rubrics": ["subscription_trap", "quiz"]},
-    "saturday":  {"time": "12:00", "rubrics": ["money_hack", "careers"]},
+    "saturday":  {"time": "12:00", "rubrics": ["careers", "startup_week"]},
     "sunday":    {"time": "19:00", "rubrics": ["money_myth", "quiz"]},
 }
 

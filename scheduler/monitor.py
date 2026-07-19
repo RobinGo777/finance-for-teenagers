@@ -138,7 +138,7 @@ async def _check_breaking_news() -> None:
             if await is_published(item_id):
                 continue
 
-            # Публікуємо через генератор #ШІ_новини
+            # Публікуємо через генератор #ТехНовини
             count = await get_monitor_count_today()
             if count >= MONITOR_MAX_PER_DAY:
                 return
@@ -180,7 +180,7 @@ async def _check_github_trending() -> None:
                 f"{repo.get('description') or 'опис відсутній'}"
             )
 
-            # Публікуємо як #ШІ_новини саме про цей проєкт
+            # Публікуємо як #ТехНовини саме про цей проєкт
             post_data = await generate_ai_news(focus=focus)
             if post_data:
                 await publish(post_data)

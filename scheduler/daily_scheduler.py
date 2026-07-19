@@ -24,13 +24,14 @@ from generators.crypto import generate_crypto
 from generators.crime import generate_crime
 from generators.careers import generate_careers
 from generators.cyber import generate_cyber
-from generators.money_hack import generate_money_hack
 from generators.quiz import generate_quiz
 from generators.cost_of_life import generate_cost_of_life
 from generators.side_hustle import generate_side_hustle
 from generators.game_economy import generate_game_economy
 from generators.subscription_trap import generate_subscription_trap
 from generators.money_myth import generate_money_myth
+from generators.behavioral_finance import generate_behavioral_finance
+from generators.startup_week import generate_startup_week
 
 KYIV = pytz.timezone(TIMEZONE)
 logger = logging.getLogger(__name__)
@@ -44,13 +45,14 @@ GENERATORS = {
     "crime":         generate_crime,
     "careers":       generate_careers,
     "cyber":         generate_cyber,
-    "money_hack":    generate_money_hack,
     "quiz":          generate_quiz,
     "cost_of_life":  generate_cost_of_life,
     "side_hustle":   generate_side_hustle,
     "game_economy":  generate_game_economy,
     "subscription_trap": generate_subscription_trap,
     "money_myth":    generate_money_myth,
+    "behavioral_finance": generate_behavioral_finance,
+    "startup_week":   generate_startup_week,
 }
 
 
@@ -177,10 +179,16 @@ def setup_scheduler() -> AsyncIOScheduler:
             replace_existing=True,
         )
 
-    # ── КІБЕРБЕЗПЕКА — 1-й і 3-й вівторок місяця о 14:00 ──
+    # ── КІБЕРБЕЗПЕКА — 1-й і 3-й вівторок місяця о 20:00 ──
     scheduler.add_job(
         publish_rubric,
-        CronTrigger(day_of_week="tue", week="1,3", hour=14, minute=0, timezone=KYIV),
+        CronTrigger(
+            day="1-7,15-21",
+            day_of_week="tue",
+            hour=20,
+            minute=0,
+            timezone=KYIV,
+        ),
         args=["cyber"],
         id="cyber_biweekly",
         replace_existing=True,

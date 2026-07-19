@@ -181,14 +181,15 @@ def _build_stock_photo(
             img = Image.alpha_composite(img.convert("RGBA"), overlay_top).convert("RGB")
             draw = ImageDraw.Draw(img)
 
-            font_rubric = _load_font(FONT_PATH, 28)
             font_title = _load_font(FONT_PATH, 58)
-            font_persona = _load_font(FONT_PATH_REGULAR, 24)
 
             draw.rectangle([(0, 0), (8, IMG_HEIGHT)], fill=accent_color)
-            draw.text((48, 42), _strip_unrenderable(rubric).upper(), font=font_rubric, fill=accent_color)
-            draw.text((48, IMG_HEIGHT - 190), textwrap.fill(_strip_unrenderable(title), width=34), font=font_title, fill=white)
-            draw.text((48, IMG_HEIGHT - 52), f"автор: {_strip_unrenderable(persona_name)}", font=font_persona, fill=accent_color)
+            draw.text(
+                (48, IMG_HEIGHT - 180),
+                textwrap.fill(_strip_unrenderable(title), width=34),
+                font=font_title,
+                fill=white,
+            )
 
             return _save_image(img)
     except Exception as exc:
@@ -241,21 +242,14 @@ def generate_post_image(
         fill=(*accent_color, 18),  # дуже прозорий
     )
 
-    # ── Рубрика (верхній лівий) ──
-    font_rubric = _load_font(FONT_PATH, 28)
-    draw.text((48, 48), _strip_unrenderable(rubric).upper(), font=font_rubric, fill=accent_color)
-
-    # ── Лінія під рубрикою ──
-    draw.line([(48, 90), (IMG_WIDTH - 48, 90)], fill=(*accent_color, 80), width=1)
-
     # ── Заголовок (великий) ──
     font_title = _load_font(FONT_PATH, 64)
     wrapped_title = textwrap.fill(_strip_unrenderable(title), width=28)
-    draw.text((48, 120), wrapped_title, font=font_title, fill=white)
+    draw.text((48, 64), wrapped_title, font=font_title, fill=white)
 
     # ── Підзаголовок / тіло ──
     title_lines = wrapped_title.count("\n") + 1
-    body_y = 120 + title_lines * 76 + 20
+    body_y = 64 + title_lines * 76 + 24
 
     font_body = _load_font(FONT_PATH_REGULAR, 36)
     wrapped_body = textwrap.fill(_strip_unrenderable(body), width=52)
@@ -267,16 +261,8 @@ def generate_post_image(
         fill=tuple(max(0, c - 15) for c in bg_color),
     )
 
-    # ── Персона (нижній лівий) ──
-    font_persona = _load_font(FONT_PATH, 26)
-    draw.text(
-        (48, IMG_HEIGHT - 54),
-        f"автор: {_strip_unrenderable(persona_name)}",
-        font=font_persona,
-        fill=accent_color,
-    )
-
     # ── Назва каналу (нижній правий) ──
+    font_persona = _load_font(FONT_PATH, 26)
     channel_text = "ФінПро для дітей"
     bbox = draw.textbbox((0, 0), channel_text, font=font_persona)
     text_width = bbox[2] - bbox[0]
@@ -416,10 +402,6 @@ def generate_quiz_image(question: str, template: dict) -> bytes:
     draw.rectangle([(0, 0), (8, size)], fill=accent_color)
     draw.rectangle([(IMG_WIDTH - size, 0), (IMG_WIDTH, 8)], fill=accent_color)
     draw.rectangle([(IMG_WIDTH - 8, 0), (IMG_WIDTH, size)], fill=accent_color)
-
-    # Заголовок рубрики
-    font_rubric = _load_font(FONT_PATH, 36)
-    draw.text((48, 48), "#ФінКвіз", font=font_rubric, fill=accent_color)
 
     # Велике питання по центру
     font_q = _load_font(FONT_PATH, 54)

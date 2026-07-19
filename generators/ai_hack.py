@@ -1,11 +1,26 @@
-from datetime import datetime
 from generators.gemini import generate_json, pick_persona, pick_template, build_base_prompt
+from data.fetchers import fetch_news
 from data.redis_client import get_used_topics, save_topic, add_weekly_topic
 from images.generator import generate_post_image_async
 
 RUBRIC_KEY     = "ai_hack"
 RUBRIC_NAME    = "#ШІ_Лайфхак"
 RUBRIC_HASHTAG = "🤖💡 #ШІ_Лайфхак"
+
+AI_HACK_TOPICS = [
+    "пояснити складну тему простими словами",
+    "створити план підготовки до контрольної",
+    "перевірити власний текст без списування",
+    "потренувати іноземну мову",
+    "скласти бюджет покупки",
+    "порівняти кілька варіантів товару",
+    "перетворити конспект на картки для повторення",
+    "підготувати запитання до співбесіди",
+    "придумати структуру презентації",
+    "розібрати помилку в коді",
+    "спланувати особистий навчальний проєкт",
+    "перевірити правдивість твердження за джерелами",
+]
 
 
 async def generate_ai_hack() -> dict:
@@ -18,10 +33,26 @@ async def generate_ai_hack() -> dict:
     template    = await pick_template()
     used_topics = await get_used_topics(RUBRIC_KEY)
 
+    available = [topic for topic in AI_HACK_TOPICS if topic not in used_topics]
+    topics_hint = ", ".join(available[:8]) if available else "інший практичний сценарій"
+    try:
+        news = await fetch_news(
+            query="ChatGPT OR Gemini OR Claude AI new feature",
+            language="en",
+            page_size=5,
+        )
+    except Exception:
+        news = []
+    updates = "\n".join(
+        f"- {item.get('title', '')}" for item in news if item.get("title")
+    )
+
     task = (
-        "Придумай ОДИН практичний лайфхак як ШІ допомагає підлітку економити час або гроші. "
-        "Обов'язково дай готовий промпт який можна скопіювати і одразу спробувати. "
-        "Інструменти: ChatGPT, Gemini, Claude, Perplexity, Midjourney, Gamma — що підходить до теми."
+        "Створи ОДИН практичний і чесний сценарій використання ШІ для підлітка. "
+        "ШІ має допомагати вчитися, планувати або перевіряти власну роботу, а не "
+        "робити домашнє завдання замість людини. Дай готовий промпт, який можна "
+        "скопіювати. Не згадуй конкретну нову функцію, якщо її немає у свіжих "
+        f"заголовках. Обери сценарій з: {topics_hint}."
     )
 
     base = build_base_prompt(
@@ -30,6 +61,7 @@ async def generate_ai_hack() -> dict:
         task=task,
         used_topics=used_topics,
         persona=persona,
+        extra_data=f"Свіжі заголовки про ШІ-інструменти:\n{updates or 'немає даних'}",
     )
 
     prompt = base + f"""

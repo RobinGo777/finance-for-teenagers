@@ -4,7 +4,24 @@ from images.generator import generate_quiz_image_async
 
 RUBRIC_KEY     = "quiz"
 RUBRIC_NAME    = "#ФінКвіз"
-RUBRIC_HASHTAG = "🎮 #ФінКвіз"
+RUBRIC_HASHTAG = "🧠 #ФінКвіз"
+
+QUIZ_TOPICS = [
+    "бюджет і планування",
+    "банківська картка та рахунок",
+    "відсотки й складний відсоток",
+    "інфляція та ціни",
+    "податки простими словами",
+    "кредит і борг",
+    "шахрайство та безпечні платежі",
+    "психологія покупок",
+    "заощадження на ціль",
+    "інвестиційний ризик",
+    "криптовалюти без хайпу",
+    "цифрові товари й підписки",
+    "заробіток і перша робота",
+    "фінансові факти з історії",
+]
 
 
 async def generate_quiz() -> dict:
@@ -22,10 +39,14 @@ async def generate_quiz() -> dict:
     from config import VISUAL_TEMPLATES
     template = next((t for t in VISUAL_TEMPLATES if t["name"] == "Game Mode"), template)
 
+    available = [topic for topic in QUIZ_TOPICS if topic not in used_topics]
+    topics_hint = ", ".join(available[:9]) if available else "інша тема фінансової грамотності"
     task = (
         "Створи один фінансовий квіз з 4 варіантами відповіді. "
         "Питання має бути цікавим — з wow-фактом або легкою провокацією. "
-        "Правильна відповідь не повинна бути очевидною."
+        "Правильна відповідь не повинна бути очевидною, але має бути однозначною "
+        "і фактично перевірюваною. Не використовуй питання з мінливою поточною "
+        f"ціною без дати. Обери тему з: {topics_hint}."
     )
 
     base = build_base_prompt(

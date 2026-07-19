@@ -21,11 +21,37 @@ from bot.moderator import get_test_rubrics
 from config import SCHEDULE
 from data import redis_client
 from generators import gemini
+from images.generator import generate_post_image
 from scheduler.daily_scheduler import GENERATORS
 from scheduler.monitor import _stable_id
 
 
 class PublisherHelpersTests(unittest.TestCase):
+    def test_post_image_omits_rubric_and_persona(self) -> None:
+        template = {
+            "name": "Test",
+            "bg": "#101010",
+            "accent": "#00ff94",
+            "emoji": "",
+        }
+        with patch("images.generator.ImageDraw.ImageDraw.text") as draw_text:
+            generate_post_image(
+                title="Чистий заголовок",
+                body="Коротке пояснення",
+                rubric="#ТаємнийХештег",
+                persona_name="Таємний Автор",
+                template=template,
+            )
+
+        drawn_strings = [
+            arg
+            for call in draw_text.call_args_list
+            for arg in call.args
+            if isinstance(arg, str)
+        ]
+        self.assertNotIn("#ТаємнийХештег", drawn_strings)
+        self.assertFalse(any("Таємний Автор" in text for text in drawn_strings))
+
     def test_html_is_escaped_and_limited(self) -> None:
         raw = "<b>5 & 7</b>" + ("x" * CAPTION_LIMIT)
         prepared = _prepare_html(raw, CAPTION_LIMIT)
@@ -128,6 +154,10 @@ class ScheduleTests(unittest.TestCase):
         self.assertTrue(scheduled)
         self.assertTrue(scheduled.issubset(GENERATORS))
         self.assertNotIn("digit_of_week", scheduled)
+        self.assertNotIn("money_hack", GENERATORS)
+        self.assertIn("behavioral_finance", scheduled)
+        self.assertIn("startup_week", scheduled)
+        self.assertIn("cyber", GENERATORS)
 
     def test_test_all_contains_every_generator_once(self) -> None:
         rubrics = get_test_rubrics()

@@ -151,6 +151,30 @@ def _test_preview_text(post_data: dict) -> str:
     ).strip()
 
 
+def _moderation_body(post_data: dict) -> str:
+    """Текст для картки модерації: для квізу показує питання + варіанти."""
+    if post_data.get("rubric") == "quiz":
+        options = _clean_poll_options(post_data.get("options", []))
+        correct_index = post_data.get("correct_index", 0)
+        answer = (
+            options[correct_index]
+            if isinstance(correct_index, int) and 0 <= correct_index < len(options)
+            else "невідомо"
+        )
+        lines = [f"❓ {post_data.get('question', '')}", ""]
+        lines += [f"{i + 1}. {opt}" for i, opt in enumerate(options)]
+        lines += ["", f"✅ Правильна: {answer}"]
+        return "\n".join(lines).strip()
+
+    text = post_data.get("post", "") or "(генератор не повернув текст поста)"
+    poll_options = _clean_poll_options(post_data.get("poll_options", []))
+    if poll_options:
+        text += "\n\nОпитування:\n" + "\n".join(
+            f"{i + 1}. {opt}" for i, opt in enumerate(poll_options)
+        )
+    return text
+
+
 async def send_test_preview(post_data: dict) -> None:
     """
     Надсилає безпечне тестове прев'ю лише модератору.
@@ -394,13 +418,16 @@ async def send_to_moderator(post_data: dict) -> None:
         InlineKeyboardButton(text="❌ Скасувати",    callback_data=f"reject:{post_id}"),
     ]])
 
+    # Для квізу поля "post" немає — показуємо питання, варіанти й правильну
+    # відповідь, щоб модератор бачив, що саме публікується.
+    body = _moderation_body(post_data)
     caption = (
         f"📋 Новий пост на модерацію\n\n"
         f"Рубрика: {rubric}\n"
         f"Персона: {persona}\n"
         f"Шаблон: {tmpl}\n\n"
         f"─────────────────\n"
-        f"{text[:800]}{'...' if len(text) > 800 else ''}"
+        f"{body[:800]}{'...' if len(body) > 800 else ''}"
     )
 
     if image:
@@ -417,3 +444,25 @@ async def send_to_moderator(post_data: dict) -> None:
             text=caption,
             reply_markup=keyboard,
         )
+
+    # Прев'ю самого опитування, щоб модератор бачив інтерактив (анонімно,
+    # щоб не плутати зі справжніми голосами в каналі).
+    if rubric == "quiz":
+        q = _clean_poll_question(post_data.get("question", ""))
+        opts = _clean_poll_options(post_data.get("options", []))
+        if q and len(opts) >= 2:
+            await bot.send_poll(
+                chat_id=MODERATOR_CHAT_ID,
+                question=f"👀 Прев'ю: {q}"[:POLL_QUESTION_LIMIT],
+                options=opts,
+                is_anonymous=True,
+            )
+    elif post_data.get("poll_options"):
+        opts = _clean_poll_options(post_data.get("poll_options", []))
+        if len(opts) >= 2:
+            await bot.send_poll(
+                chat_id=MODERATOR_CHAT_ID,
+                question="👀 Прев'ю: Який факт — брехня шахрая?",
+                options=opts,
+                is_anonymous=True,
+            )

@@ -108,11 +108,14 @@ VISUAL_TEMPLATES = [
 # ─────────────────────────────────────────
 # РОЗКЛАД ПУБЛІКАЦІЙ
 # ─────────────────────────────────────────
+# Примітка: рубрики "video" тут НЕМАЄ навмисно — #ВідеоТижня публікується
+# подієво реалтайм-монітором, лише коли реально трапляється варте відео,
+# а не примусово за графіком.
 SCHEDULE = {
     "monday":    {"time": "18:00", "rubrics": ["ai_news", "game_economy"]},
-    "tuesday":   {"time": "18:30", "rubrics": ["cost_of_life", "video", "ai_hack"]},
+    "tuesday":   {"time": "18:30", "rubrics": ["cost_of_life", "ai_hack"]},
     "wednesday": {"time": "19:00", "rubrics": ["side_hustle", "crime"]},
-    "thursday":  {"time": "18:00", "rubrics": ["crypto", "video", "ai_hack"]},
+    "thursday":  {"time": "18:00", "rubrics": ["crypto", "ai_hack"]},
     "friday":    {"time": "17:45", "rubrics": ["subscription_trap", "quiz"]},
     "saturday":  {"time": "12:00", "rubrics": ["money_hack", "careers"]},
     "sunday":    {"time": "19:00", "rubrics": ["money_myth", "quiz"]},
@@ -139,6 +142,19 @@ YOUTUBE_MIN_VIEWS      = 20_000     # мінімум переглядів для
 VIDEO_PUBLISHED_AFTER_HOURS = 96      # шукаємо відео за останні 4 дні
 VIDEO_MIN_VIEWS_FLOOR       = 5_000   # абсолютний мінімум для fallback
 VIDEO_MATCH_BONUS_ONLY      = True    # збіг зі свіжими новинами = бонус, не фільтр
+
+# Приймаємо лише відео цими мовами аудіо (порожня = невідомо, теж пропускаємо).
+# Мета — не постити ролики, які підліток не зрозуміє (напр. гінді на NDTV India).
+VIDEO_ALLOWED_LANGUAGES = ["en", "uk"]
+
+# Загальні новинні канали: часто це «балакучі» сюжети диктора без реального
+# показу події (напр. NDTV з фото прем'єра замість запуску ракети).
+# Не забороняємо повністю, але знижуємо пріоритет на користь каналів із кадрами.
+NEWS_CHANNEL_HINTS = [
+    "ndtv", "cnn", "bbc news", "fox news", "msnbc", "wion", "aljazeera",
+    "al jazeera", "times of india", "india today", "republic", "abp",
+    "zee news", "reuters", "ap ", "sky news", "euronews", "dw news",
+]
 
 TRUSTED_VIDEO_CHANNEL_HINTS = [
     "techcrunch",

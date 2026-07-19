@@ -5,13 +5,13 @@ from data.fetchers import fetch_all_rss, fetch_news
 from images.generator import generate_post_image_async
 
 RUBRIC_KEY     = "ai_news"
-RUBRIC_NAME    = "#ШІ_новини"
-RUBRIC_HASHTAG = "🤖 #ШІ_новини"
+RUBRIC_NAME    = "#ТехНовини"
+RUBRIC_HASHTAG = "🚀 #ТехНовини"
 
 
 async def generate_ai_news(focus: str | None = None) -> dict:
     """
-    Генерує пост для рубрики #ШІ_новини.
+    Генерує пост для рубрики #ТехНовини (технології + ШІ, гаджети, космос, наука).
     Використовує свіжі RSS + NewsAPI + Gemini web search.
 
     focus — необов'язковий конкретний матеріал (заголовок новини, назва репо
@@ -21,9 +21,12 @@ async def generate_ai_news(focus: str | None = None) -> dict:
     Повертає dict з текстом поста, картинкою і метаданими.
     """
 
-    # 1. Збираємо свіжі дані
+    # 1. Збираємо свіжі дані (не лише ШІ, а й техно-світ загалом)
     rss_items  = await fetch_all_rss(limit_per_feed=3)
-    news_items = await fetch_news(query="artificial intelligence AI", page_size=5)
+    news_items = await fetch_news(
+        query="technology OR AI OR gadgets OR space OR science OR robotics",
+        page_size=5,
+    )
 
     # Формуємо короткий список заголовків для промпту
     rss_titles  = [i["title"] for i in rss_items if i.get("title")][:6]
@@ -50,9 +53,11 @@ async def generate_ai_news(focus: str | None = None) -> dict:
         )
     else:
         task = (
-            "Знайди найцікавішу новину про ШІ за сьогодні і напиши пост. "
-            "Обов'язково поясни що це означає конкретно для підлітка або студента. "
-            "Можеш взяти одну з наданих новин або знайти свіжішу через пошук."
+            "Знайди найцікавішу свіжу новину зі світу технологій — це може бути "
+            "штучний інтелект, гаджети, космос, робототехніка, наука чи великі "
+            "IT-компанії. Напиши захопливий пост. Обов'язково поясни, що це "
+            "означає конкретно для підлітка або студента. Можеш взяти одну з "
+            "наданих новин або знайти свіжішу через пошук."
         )
 
     base = build_base_prompt(

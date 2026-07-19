@@ -239,6 +239,7 @@ async def fetch_youtube_videos(
         "order": "date",
         "publishedAfter": published_after,
         "maxResults": max_results,
+        "relevanceLanguage": "en",   # зміщуємо видачу в бік англомовного контенту
         "key": YOUTUBE_API_KEY,
     }
 
@@ -265,14 +266,17 @@ async def fetch_youtube_videos(
     for item in stats_data.get("items", []):
         views = int(item["statistics"].get("viewCount", 0))
         if views >= views_threshold:
+            snippet = item["snippet"]
             videos.append({
                 "video_id": item["id"],
-                "title": item["snippet"]["title"],
-                "channel": item["snippet"]["channelTitle"],
+                "title": snippet["title"],
+                "channel": snippet["channelTitle"],
                 "views": views,
-                "published": item["snippet"]["publishedAt"],
-                "thumbnail": item["snippet"]["thumbnails"]["high"]["url"],
+                "published": snippet["publishedAt"],
+                "thumbnail": snippet["thumbnails"]["high"]["url"],
                 "url": f"https://youtu.be/{item['id']}",
+                # Мова аудіо/опису — щоб відсіювати неангломовні ролики.
+                "language": snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or "",
             })
 
     return sorted(videos, key=lambda x: x["views"], reverse=True)

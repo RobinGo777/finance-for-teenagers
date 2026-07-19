@@ -13,9 +13,17 @@ from config import (
     YOUTUBE_MIN_VIEWS,
     VIDEO_PUBLISHED_AFTER_HOURS,
     VIDEO_MIN_VIEWS_FLOOR,
+    VIDEO_ALLOWED_LANGUAGES,
+    NEWS_CHANNEL_HINTS,
 )
 
 logger = logging.getLogger(__name__)
+
+# Скрипти, які підліток-глядач не зрозуміє (гінді, арабська, CJK, тайська тощо).
+# Латиниця й кирилиця — ок. Так відсіюємо, напр., індомовні новинні ролики.
+_NON_LATIN_SCRIPT = re.compile(
+    r"[\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]"
+)
 
 RUBRIC_KEY     = "video"
 RUBRIC_NAME    = "#ВідеоТижня"
@@ -55,6 +63,25 @@ def _is_trusted_channel(channel: str) -> bool:
     return any(hint in c for hint in TRUSTED_VIDEO_CHANNEL_HINTS)
 
 
+def _is_news_channel(channel: str) -> bool:
+    """Загальний новинний канал (часто балакучі сюжети без реальних кадрів)."""
+    c = _normalize_text(channel)
+    return any(hint in c for hint in NEWS_CHANNEL_HINTS)
+
+
+def _title_is_understandable(title: str) -> bool:
+    """False, якщо заголовок містить нелатинські/некириличні символи (гінді тощо)."""
+    return not _NON_LATIN_SCRIPT.search(title or "")
+
+
+def _language_ok(language: str) -> bool:
+    """Пропускаємо англ/укр або невідому мову; відсіюємо явно чужомовні."""
+    if not language:
+        return True  # мову не вказано — не відкидаємо
+    lang = language.lower().split("-")[0]
+    return lang in VIDEO_ALLOWED_LANGUAGES
+
+
 def _news_match_score(video_title: str, recent_news_titles: list[str]) -> int:
     """Наскільки відео перегукується зі свіжими новинами (0 = немає збігу).
 
@@ -90,10 +117,15 @@ async def _collect_videos(min_views: int, hours: int) -> list[dict]:
 
 
 async def _filter_fresh(videos: list[dict]) -> list[dict]:
-    """Прибирає клікбейт і вже опубліковані відео."""
+    """Прибирає клікбейт, чужомовне та вже опубліковане."""
     result = []
     for v in videos:
-        if _has_clickbait(v.get("title", "")):
+        title = v.get("title", "")
+        if _has_clickbait(title):
+            continue
+        if not _title_is_understandable(title):
+            continue
+        if not _language_ok(v.get("language", "")):
             continue
         if await is_published(v["video_id"]):
             continue
@@ -147,11 +179,14 @@ async def generate_video() -> dict | None:
         logger.info("[video] Нічого не знайдено навіть після послаблення фільтрів")
         return None
 
-    # Рейтинг = надійний канал (+3) + релевантність новинам (0..3) + перегляди.
+    # Рейтинг: надійний тех-канал (+3), релевантність новинам (0..3),
+    # мінус за «балакучий» новинний канал (-2), далі перегляди.
     def _rank(v: dict) -> tuple:
         score = 0
         if _is_trusted_channel(v.get("channel", "")):
             score += 3
+        if _is_news_channel(v.get("channel", "")):
+            score -= 2
         score += min(_news_match_score(v.get("title", ""), recent_news_titles), 3)
         return (score, v["views"])
 
@@ -164,8 +199,14 @@ async def generate_video() -> dict | None:
 
     task = (
         "Вибери ОДНЕ найцікавіше відео зі списку для підлітків 12-20 років. "
-        "Напиши захопливий коментар українською — що відбувається у відео і чому це вражає. "
-        "Додай фінансовий або науковий кут якщо можливо."
+        "Обирай те, що реально ПОКАЗУЄ подію (кадри запуску, демонстрацію, "
+        "експеримент), а не просто балакучий новинний сюжет диктора. "
+        "ВАЖЛИВО: якщо жодне відео не є справді цікавим і вартим публікації "
+        "(нудне, чужомовне, лише новинний переказ без реальних кадрів) — "
+        "поверни video_id: \"\" (порожній рядок), і ми нічого не опублікуємо. "
+        "Краще пропустити тиждень, ніж показати слабке відео. "
+        "Якщо ж відео гарне — напиши захопливий коментар українською: що "
+        "відбувається у відео і чому це вражає. Додай фінансовий або науковий кут."
     )
 
     base = build_base_prompt(
@@ -188,10 +229,18 @@ async def generate_video() -> dict | None:
 
     data = await generate_json(prompt)
 
-    video_id = data.get("video_id", "")
+    video_id = (data.get("video_id") or "").strip()
 
-    # Перевіряємо що відео є в нашому списку
-    selected = next((v for v in top_videos if v["video_id"] == video_id), top_videos[0])
+    # LLM свідомо відмовився — жодне відео не варте публікації.
+    if not video_id:
+        logger.info("[video] Модель відхилила всі кандидати — пропускаємо публікацію")
+        return None
+
+    # Перевіряємо що відео є в нашому списку; якщо ні — не вигадуємо, пропускаємо.
+    selected = next((v for v in top_videos if v["video_id"] == video_id), None)
+    if selected is None:
+        logger.info("[video] Обраний video_id не зі списку — пропускаємо публікацію")
+        return None
 
     post_with_link = data["post"] + f"\nhttps://youtu.be/{selected['video_id']}"
 

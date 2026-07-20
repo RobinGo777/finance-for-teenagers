@@ -63,6 +63,13 @@ _GEMINI_RAW = [
 ]
 GEMINI_MODELS = _normalize_gemini_models(_GEMINI_RAW)
 
+# Free tier: ~5–15 RPM. Тримаємо паузу між викликами і чекаємо Retry-After на 429.
+GEMINI_MIN_INTERVAL_SEC = float(os.getenv("GEMINI_MIN_INTERVAL_SEC", "6"))
+GEMINI_MAX_RETRY_WAIT_SEC = float(os.getenv("GEMINI_MAX_RETRY_WAIT_SEC", "180"))
+# Скільки разів scheduler відкладає рубрику при 429 (через RPM, не денний ліміт).
+GEMINI_SCHEDULE_RETRIES = int(os.getenv("GEMINI_SCHEDULE_RETRIES", "2"))
+GEMINI_SCHEDULE_RETRY_DELAY_SEC = int(os.getenv("GEMINI_SCHEDULE_RETRY_DELAY_SEC", "180"))
+
 # ─────────────────────────────────────────
 # UPSTASH REDIS
 # ─────────────────────────────────────────

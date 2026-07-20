@@ -2,10 +2,13 @@ import asyncio
 import json
 import logging
 import random
+import time
 import httpx
 from config import (
     GEMINI_API_KEY,
     GEMINI_MODELS,
+    GEMINI_MIN_INTERVAL_SEC,
+    GEMINI_MAX_RETRY_WAIT_SEC,
     PERSONAS,
     VISUAL_TEMPLATES,
 )
@@ -18,11 +21,19 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────
 
 # Кількість спроб для кожної моделі перед переходом до наступної.
-MODEL_RETRIES = 2
-RETRY_BASE_DELAY = 2  # секунди (експоненційний backoff)
+MODEL_RETRIES = 3
+RETRY_BASE_DELAY = 4  # секунди (експоненційний backoff)
 
 # Спільний HTTP-клієнт (пул з'єднань) — створюється лениво.
 _client: httpx.AsyncClient | None = None
+# Один запит за раз + пауза між викликами — щоб не спалити RPM free tier.
+_request_lock = asyncio.Lock()
+_cooldown_until = 0.0
+_last_request_at = 0.0
+
+
+class GeminiQuotaExhausted(Exception):
+    """Денний ліміт / тривалий 429 — сенсу одразу ретраїти немає."""
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -38,6 +49,26 @@ async def close() -> None:
     if _client is not None and not _client.is_closed:
         await _client.aclose()
     _client = None
+
+
+def _set_cooldown(seconds: float) -> None:
+    global _cooldown_until
+    _cooldown_until = max(_cooldown_until, time.monotonic() + max(0.0, seconds))
+
+
+async def _wait_for_rate_slot() -> None:
+    """Чекає глобальний cooldown + мінімальний інтервал між запитами."""
+    global _last_request_at
+    while True:
+        now = time.monotonic()
+        wait_cooldown = _cooldown_until - now
+        wait_gap = GEMINI_MIN_INTERVAL_SEC - (now - _last_request_at)
+        wait = max(wait_cooldown, wait_gap, 0.0)
+        if wait <= 0:
+            _last_request_at = time.monotonic()
+            return
+        logger.info("Gemini rate-limit: чекаємо %.1f с", wait)
+        await asyncio.sleep(wait)
 
 
 def _model_url(model: str) -> str:
@@ -131,13 +162,18 @@ def _is_fatal_auth_error(error: Exception) -> bool:
 
 async def _do_request(model: str, payload: dict) -> str:
     """Виконує один запит до конкретної моделі та дістає весь текст відповіді."""
-    response = await _get_client().post(
-        _model_url(model),
-        headers={"x-goog-api-key": GEMINI_API_KEY},
-        json=payload,
-    )
-    response.raise_for_status()
-    data = response.json()
+    async with _request_lock:
+        await _wait_for_rate_slot()
+        response = await _get_client().post(
+            _model_url(model),
+            headers={"x-goog-api-key": GEMINI_API_KEY},
+            json=payload,
+        )
+        if response.status_code == 429:
+            wait = _retry_after_seconds_from_response(response) or RETRY_BASE_DELAY
+            _set_cooldown(min(wait, GEMINI_MAX_RETRY_WAIT_SEC))
+        response.raise_for_status()
+        data = response.json()
 
     # Промпт цілком заблоковано (safety / recitation) — кандидатів немає.
     candidates = data.get("candidates") or []
@@ -158,25 +194,55 @@ async def _do_request(model: str, payload: dict) -> str:
 
 def _should_retry(error: Exception) -> bool:
     """Чи має сенс повторити ту саму модель перед fallback."""
+    if isinstance(error, GeminiQuotaExhausted):
+        return False
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         return status == 429 or status >= 500
     return isinstance(error, (httpx.TimeoutException, httpx.NetworkError))
 
 
-def _retry_after_seconds(error: Exception | None) -> float | None:
-    """Дістає рекомендовану паузу з відповіді 429 (Retry-After або RetryInfo)."""
+def _error_body_text(error: Exception | None) -> str:
     if not isinstance(error, httpx.HTTPStatusError):
-        return None
-    header = error.response.headers.get("Retry-After")
+        return ""
+    try:
+        err = error.response.json().get("error", {})
+        return f"{err.get('status', '')} {err.get('message', '')}".lower()
+    except Exception:
+        return str(error).lower()
+
+
+def _is_daily_quota_exhausted(error: Exception | None) -> bool:
+    """True якщо 429 схожий на денний ліміт (RPD), а не короткочасний RPM."""
+    if not isinstance(error, httpx.HTTPStatusError):
+        return False
+    if error.response.status_code != 429:
+        return False
+    text = _error_body_text(error)
+    # Явні денні маркери в тілі / quotaId.
+    day_markers = ("per_day", "perday", "per day", "requestsperday", "rpd")
+    minute_markers = ("per_minute", "perminute", "per minute", "requestsperminute", "rpm")
+    if any(m in text.replace("_", "").replace("-", "") for m in (
+        "generatedrequestsperday",
+        "generatecontentfreetierrequestsperday",
+    )) or any(m in text for m in day_markers):
+        if any(m in text for m in minute_markers):
+            return False
+        return True
+    wait = _retry_after_seconds(error)
+    # Дуже довгий Retry-After ≈ денний ліміт (години), не RPM.
+    return wait is not None and wait > GEMINI_MAX_RETRY_WAIT_SEC
+
+
+def _retry_after_seconds_from_response(response: httpx.Response) -> float | None:
+    header = response.headers.get("Retry-After")
     if header:
         try:
             return float(header)
         except ValueError:
             pass
-    # Gemini кладе паузу в тіло: error.details[].retryDelay = "37s"
     try:
-        details = error.response.json().get("error", {}).get("details", [])
+        details = response.json().get("error", {}).get("details", [])
         for item in details:
             delay = item.get("retryDelay", "")
             if isinstance(delay, str) and delay.endswith("s"):
@@ -186,12 +252,22 @@ def _retry_after_seconds(error: Exception | None) -> float | None:
     return None
 
 
+def _retry_after_seconds(error: Exception | None) -> float | None:
+    """Дістає рекомендовану паузу з відповіді 429 (Retry-After або RetryInfo)."""
+    if not isinstance(error, httpx.HTTPStatusError):
+        return None
+    return _retry_after_seconds_from_response(error.response)
+
+
 async def _sleep_before_retry(attempt: int, error: Exception | None = None) -> None:
     # Поважаємо Retry-After від Gemini (для 429), інакше експоненційний backoff.
     wait = _retry_after_seconds(error)
     if wait is None:
-        wait = RETRY_BASE_DELAY * attempt
-    await asyncio.sleep(min(wait, 60))
+        wait = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+    wait = min(wait, GEMINI_MAX_RETRY_WAIT_SEC)
+    _set_cooldown(wait)
+    logger.info("Gemini backoff: %.1f с (спроба %s)", wait, attempt)
+    await asyncio.sleep(wait)
 
 
 async def generate(prompt: str, use_search: bool = False) -> str:
@@ -214,6 +290,10 @@ async def generate(prompt: str, use_search: bool = False) -> str:
                 if _is_fatal_auth_error(error):
                     raise
                 last_exc = error
+                if _is_daily_quota_exhausted(error):
+                    raise GeminiQuotaExhausted(
+                        f"Денний ліміт Gemini вичерпано на {model}"
+                    ) from error
                 # 403 на модель (недоступна / немає доступу) — одразу наступна.
                 if error.response.status_code == 403:
                     logger.warning(
@@ -236,6 +316,9 @@ async def generate(prompt: str, use_search: bool = False) -> str:
                 continue
             break
 
+        # Перед наступною моделлю теж почекаємо, якщо остання помилка — 429.
+        if isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code == 429:
+            await _sleep_before_retry(1, last_exc)
         logger.warning("Перемикання Gemini з %s на резервну модель", model)
 
     raise ValueError(
@@ -303,6 +386,10 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
                 if _is_fatal_auth_error(error):
                     raise
                 last_exc = error
+                if _is_daily_quota_exhausted(error):
+                    raise GeminiQuotaExhausted(
+                        f"Денний ліміт Gemini вичерпано на {model}"
+                    ) from error
                 if error.response.status_code == 403:
                     logger.warning(
                         "Gemini JSON %s недоступна (403) — перемикаємось на резервну",
@@ -328,6 +415,8 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
                 continue
             break
 
+        if isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code == 429:
+            await _sleep_before_retry(1, last_exc)
         logger.warning("JSON fallback: перемикання з моделі %s", model)
 
     raise ValueError(

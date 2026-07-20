@@ -12,9 +12,13 @@ from config import (
     SCHEDULE_RANDOM_OFFSET_MAX,
     TIMEZONE,
     QUIZ_ANSWER_DELAY_HOURS,
+    GEMINI_SCHEDULE_RETRIES,
+    GEMINI_SCHEDULE_RETRY_DELAY_SEC,
 )
 from data.redis_client import get as redis_get
 from bot.publisher import publish, notify_moderator
+from generators.gemini import GeminiQuotaExhausted
+from utils.http_safe import safe_error_text
 
 # Імпорти всіх генераторів
 from generators.ai_news import generate_ai_news
@@ -55,13 +59,30 @@ GENERATORS = {
     "startup_week":   generate_startup_week,
 }
 
+# Пауза між рубриками одного слоту — щоб не спалити Gemini RPM (free tier).
+RUBRIC_STAGGER_SEC = 150
+
+
+def _is_rate_limit_error(error: BaseException) -> bool:
+    text = str(error)
+    return (
+        isinstance(error, GeminiQuotaExhausted)
+        or "429" in text
+        or "Too Many Requests" in text
+        or "RESOURCE_EXHAUSTED" in text
+    )
+
 
 # ─────────────────────────────────────────
 # ПУБЛІКАЦІЯ ОДНІЄЇ РУБРИКИ
 # ─────────────────────────────────────────
 
-async def publish_rubric(rubric_key: str) -> None:
-    """Генерує і публікує один пост рубрики."""
+async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
+    """Генерує і публікує один пост рубрики.
+
+    При 429 (RPM) відкладає повтор через GEMINI_SCHEDULE_RETRY_DELAY_SEC,
+    щоб не втрачати денний слот через короткочасний ліміт.
+    """
 
     # Перевіряємо чи бот не на паузі
     paused = await redis_get("settings:paused")
@@ -78,23 +99,56 @@ async def publish_rubric(rubric_key: str) -> None:
             await publish(post_data)
         else:
             logger.info("[scheduler] Рубрика %s не дала контенту цього разу", rubric_key)
+    except GeminiQuotaExhausted as e:
+        logger.warning("[scheduler] Денний ліміт Gemini для %s: %s", rubric_key, e)
+        await notify_moderator(
+            f"🛑 Денний ліміт Gemini — рубрика «{rubric_key}» пропущена.\n"
+            "Квота скидається ≈10:00 за Києвом (опівніч PT)."
+        )
     except Exception as e:
-        logger.exception("[scheduler] Помилка генерації %s: %s", rubric_key, e)
-        await notify_moderator(f"⚠️ Збій генерації рубрики «{rubric_key}»: {e}")
+        if _is_rate_limit_error(e) and attempt <= GEMINI_SCHEDULE_RETRIES:
+            delay = GEMINI_SCHEDULE_RETRY_DELAY_SEC * attempt
+            logger.warning(
+                "[scheduler] 429 на %s — повтор #%s через %s с",
+                rubric_key,
+                attempt,
+                delay,
+            )
+            await notify_moderator(
+                f"⏳ Gemini 429 на «{rubric_key}» — повтор через {delay // 60} хв "
+                f"(спроба {attempt}/{GEMINI_SCHEDULE_RETRIES})."
+            )
+            await asyncio.sleep(delay)
+            await publish_rubric(rubric_key, attempt=attempt + 1)
+            return
+        logger.exception(
+            "[scheduler] Помилка генерації %s: %s",
+            rubric_key,
+            safe_error_text(e),
+        )
+        await notify_moderator(
+            f"⚠️ Збій генерації рубрики «{rubric_key}»: {safe_error_text(e)}"
+        )
 
 
 # ─────────────────────────────────────────
 # ЗАДАЧА З РАНДОМНИМ ЗСУВОМ ЧАСУ
 # ─────────────────────────────────────────
 
-async def publish_rubric_with_offset(rubric_key: str, base_hour: int, base_minute: int) -> None:
-    """Додає рандомний зсув ±хвилин перед публікацією."""
+async def publish_rubric_with_offset(
+    rubric_key: str,
+    base_hour: int,
+    base_minute: int,
+    stagger_index: int = 0,
+) -> None:
+    """Додає рандомний зсув ±хвилин і розносить рубрики одного слоту."""
     offset = random.randint(SCHEDULE_RANDOM_OFFSET_MIN, SCHEDULE_RANDOM_OFFSET_MAX)
     total_minutes = base_hour * 60 + base_minute + offset
     total_minutes = max(0, min(total_minutes, 23 * 60 + 59))
 
     now_minutes = datetime.now(KYIV).hour * 60 + datetime.now(KYIV).minute
     wait_seconds = max(0, (total_minutes - now_minutes) * 60)
+    wait_seconds += stagger_index * RUBRIC_STAGGER_SEC
 
     await asyncio.sleep(wait_seconds)
     await publish_rubric(rubric_key)
@@ -109,75 +163,28 @@ def setup_scheduler() -> AsyncIOScheduler:
 
     scheduler = AsyncIOScheduler(timezone=KYIV)
 
-    # ── ПОНЕДІЛОК 18:00 ──
-    for rubric in SCHEDULE["monday"]["rubrics"]:
-        scheduler.add_job(
-            publish_rubric_with_offset,
-            CronTrigger(day_of_week="mon", hour=18, minute=0, timezone=KYIV),
-            args=[rubric, 18, 0],
-            id=f"monday_{rubric}",
-            replace_existing=True,
-        )
+    def _add_day_jobs(day_key: str, day_of_week: str, hour: int, minute: int) -> None:
+        for index, rubric in enumerate(SCHEDULE[day_key]["rubrics"]):
+            scheduler.add_job(
+                publish_rubric_with_offset,
+                CronTrigger(
+                    day_of_week=day_of_week,
+                    hour=hour,
+                    minute=minute,
+                    timezone=KYIV,
+                ),
+                args=[rubric, hour, minute, index],
+                id=f"{day_key}_{rubric}",
+                replace_existing=True,
+            )
 
-    # ── ВІВТОРОК 18:30 ──
-    for rubric in SCHEDULE["tuesday"]["rubrics"]:
-        scheduler.add_job(
-            publish_rubric_with_offset,
-            CronTrigger(day_of_week="tue", hour=18, minute=30, timezone=KYIV),
-            args=[rubric, 18, 30],
-            id=f"tuesday_{rubric}",
-            replace_existing=True,
-        )
-
-    # ── СЕРЕДА 19:00 ──
-    for rubric in SCHEDULE["wednesday"]["rubrics"]:
-        scheduler.add_job(
-            publish_rubric_with_offset,
-            CronTrigger(day_of_week="wed", hour=19, minute=0, timezone=KYIV),
-            args=[rubric, 19, 0],
-            id=f"wednesday_{rubric}",
-            replace_existing=True,
-        )
-
-    # ── ЧЕТВЕР 18:00 ──
-    for rubric in SCHEDULE["thursday"]["rubrics"]:
-        scheduler.add_job(
-            publish_rubric_with_offset,
-            CronTrigger(day_of_week="thu", hour=18, minute=0, timezone=KYIV),
-            args=[rubric, 18, 0],
-            id=f"thursday_{rubric}",
-            replace_existing=True,
-        )
-
-    # ── П'ЯТНИЦЯ 17:45 ──
-    for rubric in SCHEDULE["friday"]["rubrics"]:
-        scheduler.add_job(
-            publish_rubric_with_offset,
-            CronTrigger(day_of_week="fri", hour=17, minute=45, timezone=KYIV),
-            args=[rubric, 17, 45],
-            id=f"friday_{rubric}",
-            replace_existing=True,
-        )
-
-    # ── СУБОТА 12:00 ──
-    for rubric in SCHEDULE["saturday"]["rubrics"]:
-        scheduler.add_job(
-            publish_rubric_with_offset,
-            CronTrigger(day_of_week="sat", hour=12, minute=0, timezone=KYIV),
-            args=[rubric, 12, 0],
-            id=f"saturday_{rubric}",
-            replace_existing=True,
-        )
-
-    # ── НЕДІЛЯ 19:00 ──
-    for rubric in SCHEDULE["sunday"]["rubrics"]:
-        scheduler.add_job(
-            publish_rubric_with_offset,
-            CronTrigger(day_of_week="sun", hour=19, minute=0, timezone=KYIV),
-            args=[rubric, 19, 0],
-            id=f"sunday_{rubric}",
-            replace_existing=True,
-        )
+    _add_day_jobs("monday", "mon", 18, 0)
+    _add_day_jobs("tuesday", "tue", 18, 30)
+    _add_day_jobs("wednesday", "wed", 19, 0)
+    _add_day_jobs("thursday", "thu", 18, 0)
+    _add_day_jobs("friday", "fri", 17, 45)
+    _add_day_jobs("saturday", "sat", 12, 0)
+    _add_day_jobs("sunday", "sun", 19, 0)
 
     # ── КІБЕРБЕЗПЕКА — 1-й і 3-й вівторок місяця о 20:00 ──
     scheduler.add_job(

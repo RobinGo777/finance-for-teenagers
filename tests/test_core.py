@@ -340,6 +340,60 @@ class GeminiModelConfigTests(unittest.TestCase):
         )
 
 
+class GeminiRateLimitTests(unittest.TestCase):
+    def test_daily_quota_detected_from_quota_id(self) -> None:
+        error = httpx.HTTPStatusError(
+            "Too Many Requests",
+            request=httpx.Request("POST", "https://example.test"),
+            response=httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "Resource exhausted",
+                        "status": "RESOURCE_EXHAUSTED",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                                "metadata": {
+                                    "quota_id": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                                },
+                            }
+                        ],
+                    }
+                },
+            ),
+        )
+        # Повідомлення без явного per_day у message — додамо в message для детектора.
+        error.response = httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": "Quota exceeded for GenerateRequestsPerDayPerProjectPerModel",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [{"retryDelay": "3600s"}],
+                }
+            },
+        )
+        self.assertTrue(gemini._is_daily_quota_exhausted(error))
+
+    def test_rpm_429_is_not_daily_quota(self) -> None:
+        error = httpx.HTTPStatusError(
+            "Too Many Requests",
+            request=httpx.Request("POST", "https://example.test"),
+            response=httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "Quota exceeded for requests per minute",
+                        "status": "RESOURCE_EXHAUSTED",
+                        "details": [{"retryDelay": "32s"}],
+                    }
+                },
+            ),
+        )
+        self.assertFalse(gemini._is_daily_quota_exhausted(error))
+
+
 class SecretRedactionTests(unittest.TestCase):
     def test_redacts_youtube_and_newsapi_keys(self) -> None:
         raw = (

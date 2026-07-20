@@ -47,7 +47,8 @@ def get_test_rubrics() -> list[str]:
 
     ordered: list[str] = []
     for day in SCHEDULE.values():
-        for rubric in day["rubrics"]:
+        for slot in day:
+            rubric = slot["rubric"]
             if rubric in GENERATORS and rubric not in ordered:
                 ordered.append(rubric)
     for rubric in GENERATORS:

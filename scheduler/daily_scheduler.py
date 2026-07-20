@@ -10,6 +10,8 @@ from config import (
     SCHEDULE,
     SCHEDULE_RANDOM_OFFSET_MIN,
     SCHEDULE_RANDOM_OFFSET_MAX,
+    CYBER_SCHEDULE_TIME,
+    QUIZ_ANSWER_CRON_TIME,
     TIMEZONE,
     QUIZ_ANSWER_DELAY_HOURS,
     GEMINI_SCHEDULE_RETRIES,
@@ -59,8 +61,9 @@ GENERATORS = {
     "startup_week":   generate_startup_week,
 }
 
-# Пауза між рубриками одного слоту — щоб не спалити Gemini RPM (free tier).
-RUBRIC_STAGGER_SEC = 150
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    hour_s, minute_s = value.split(":")
+    return int(hour_s), int(minute_s)
 
 
 def _is_rate_limit_error(error: BaseException) -> bool:
@@ -139,16 +142,14 @@ async def publish_rubric_with_offset(
     rubric_key: str,
     base_hour: int,
     base_minute: int,
-    stagger_index: int = 0,
 ) -> None:
-    """Додає рандомний зсув ±хвилин і розносить рубрики одного слоту."""
+    """Чекає до базового слота + рандомний зсув, потім публікує."""
     offset = random.randint(SCHEDULE_RANDOM_OFFSET_MIN, SCHEDULE_RANDOM_OFFSET_MAX)
-    total_minutes = base_hour * 60 + base_minute + offset
-    total_minutes = max(0, min(total_minutes, 23 * 60 + 59))
+    target_minutes = base_hour * 60 + base_minute + offset
+    target_minutes = max(0, min(target_minutes, 23 * 60 + 59))
 
     now_minutes = datetime.now(KYIV).hour * 60 + datetime.now(KYIV).minute
-    wait_seconds = max(0, (total_minutes - now_minutes) * 60)
-    wait_seconds += stagger_index * RUBRIC_STAGGER_SEC
+    wait_seconds = max(0, (target_minutes - now_minutes) * 60)
 
     await asyncio.sleep(wait_seconds)
     await publish_rubric(rubric_key)
@@ -158,53 +159,69 @@ async def publish_rubric_with_offset(
 # НАЛАШТУВАННЯ РОЗКЛАДУ
 # ─────────────────────────────────────────
 
+_DAY_OF_WEEK = {
+    "monday": "mon",
+    "tuesday": "tue",
+    "wednesday": "wed",
+    "thursday": "thu",
+    "friday": "fri",
+    "saturday": "sat",
+    "sunday": "sun",
+}
+
+
 def setup_scheduler() -> AsyncIOScheduler:
     """Створює і налаштовує APScheduler з усіма задачами."""
 
     scheduler = AsyncIOScheduler(timezone=KYIV)
 
-    def _add_day_jobs(day_key: str, day_of_week: str, hour: int, minute: int) -> None:
-        for index, rubric in enumerate(SCHEDULE[day_key]["rubrics"]):
+    for day_key, slots in SCHEDULE.items():
+        day_of_week = _DAY_OF_WEEK[day_key]
+        for slot in slots:
+            base_hour, base_minute = _parse_hhmm(slot["time"])
+            # Крон стартує в найраніший можливий момент зсуву,
+            # щоб від'ємний offset теж міг спрацювати.
+            trigger_minutes = base_hour * 60 + base_minute + SCHEDULE_RANDOM_OFFSET_MIN
+            trigger_minutes = max(0, min(trigger_minutes, 23 * 60 + 59))
+            trigger_hour, trigger_minute = divmod(trigger_minutes, 60)
+
             scheduler.add_job(
                 publish_rubric_with_offset,
                 CronTrigger(
                     day_of_week=day_of_week,
-                    hour=hour,
-                    minute=minute,
+                    hour=trigger_hour,
+                    minute=trigger_minute,
                     timezone=KYIV,
                 ),
-                args=[rubric, hour, minute, index],
-                id=f"{day_key}_{rubric}",
+                args=[slot["rubric"], base_hour, base_minute],
+                id=f"{day_key}_{slot['rubric']}",
                 replace_existing=True,
             )
 
-    _add_day_jobs("monday", "mon", 18, 0)
-    _add_day_jobs("tuesday", "tue", 18, 30)
-    _add_day_jobs("wednesday", "wed", 19, 0)
-    _add_day_jobs("thursday", "thu", 18, 0)
-    _add_day_jobs("friday", "fri", 17, 45)
-    _add_day_jobs("saturday", "sat", 12, 0)
-    _add_day_jobs("sunday", "sun", 19, 0)
-
-    # ── КІБЕРБЕЗПЕКА — 1-й і 3-й вівторок місяця о 20:00 ──
+    # ── КІБЕРБЕЗПЕКА — 1-й і 3-й вівторок місяця ──
+    cyber_hour, cyber_minute = _parse_hhmm(CYBER_SCHEDULE_TIME)
+    cyber_trigger = cyber_hour * 60 + cyber_minute + SCHEDULE_RANDOM_OFFSET_MIN
+    cyber_trigger = max(0, min(cyber_trigger, 23 * 60 + 59))
+    cyber_th, cyber_tm = divmod(cyber_trigger, 60)
     scheduler.add_job(
-        publish_rubric,
+        publish_rubric_with_offset,
         CronTrigger(
             day="1-7,15-21",
             day_of_week="tue",
-            hour=20,
-            minute=0,
+            hour=cyber_th,
+            minute=cyber_tm,
             timezone=KYIV,
         ),
-        args=["cyber"],
+        args=["cyber", cyber_hour, cyber_minute],
         id="cyber_biweekly",
         replace_existing=True,
     )
 
-    # ── ВІДПОВІДЬ НА КВІЗ — щодня о 19:10 (перевіряємо чи є pending) ──
+    # ── ВІДПОВІДЬ НА КВІЗ — щодня (перевіряємо чи є pending) ──
+    quiz_hour, quiz_minute = _parse_hhmm(QUIZ_ANSWER_CRON_TIME)
     scheduler.add_job(
         check_and_publish_quiz_answers,
-        CronTrigger(hour=19, minute=10, timezone=KYIV),
+        CronTrigger(hour=quiz_hour, minute=quiz_minute, timezone=KYIV),
         id="quiz_answers",
         replace_existing=True,
     )
@@ -219,7 +236,7 @@ def setup_scheduler() -> AsyncIOScheduler:
 async def check_and_publish_quiz_answers() -> None:
     """
     Публікує відповіді на «дозрілі» квізи (старші за QUIZ_ANSWER_DELAY_HOURS)
-    разом зі статистикою голосів. Запускається щодня о 19:10.
+    разом зі статистикою голосів. Запускається щодня (див. QUIZ_ANSWER_CRON_TIME).
     """
     import time
     from data.redis_client import (

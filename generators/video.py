@@ -27,6 +27,9 @@ from config import (
     VIDEO_LOW_VALUE_TERMS,
     VIDEO_SEARCH_QUERIES_PER_RUN,
     VIDEO_SEARCH_CACHE_TTL_SEC,
+    VIDEO_MIN_RANK_SCORE,
+    VIDEO_GEMINI_COOLDOWN_HOURS,
+    VIDEO_REJECT_TTL_SEC,
 )
 from utils.http_safe import safe_error_text
 
@@ -83,6 +86,35 @@ SEARCH_QUERY_GROUPS = {
 }
 
 MATCH_STOPWORDS = set(VIDEO_MATCH_STOPWORDS)
+
+_GEMINI_COOLDOWN_KEY = "video:gemini_cooldown"
+
+
+def _rejected_key(video_id: str) -> str:
+    return f"video:rejected:{video_id}"
+
+
+async def _is_gemini_cooling_down() -> bool:
+    return bool(await redis_get(_GEMINI_COOLDOWN_KEY))
+
+
+async def _mark_gemini_attempted() -> None:
+    await redis_set(
+        _GEMINI_COOLDOWN_KEY,
+        "1",
+        ex=VIDEO_GEMINI_COOLDOWN_HOURS * 3600,
+    )
+
+
+async def _is_rejected(video_id: str) -> bool:
+    return bool(await redis_get(_rejected_key(video_id)))
+
+
+async def _mark_rejected(video_ids: list[str]) -> None:
+    """Негативний кеш: не питати Gemini знову про ті самі id."""
+    for video_id in video_ids:
+        if video_id:
+            await redis_set(_rejected_key(video_id), "1", ex=VIDEO_REJECT_TTL_SEC)
 
 
 def _normalize_text(text: str) -> str:
@@ -251,6 +283,8 @@ async def _filter_fresh(videos: list[dict]) -> list[dict]:
                 continue
         if await is_published(v["video_id"]):
             continue
+        if await _is_rejected(v["video_id"]):
+            continue
         result.append(v)
     return result
 
@@ -272,12 +306,17 @@ async def generate_video() -> dict | None:
     """
     Знаходить свіже топове відео на YouTube і генерує коментар.
     Повертає None якщо нічого цікавого не знайдено.
-    Публікується у будь-який час коли знайдено (не вночі).
 
-    Один широкий пошук бере кандидатів за останні дні без повторного
-    витрачання YouTube-квоти. Якість важливіша за саму кількість переглядів.
-    Збіг зі свіжими новинами — лише бонус до рейтингу, не фільтр.
+    Gemini викликається лише якщо є достатньо сильні кандидати,
+    немає cooldown і id ще не в негативному кеші відхилень.
     """
+
+    if await _is_gemini_cooling_down():
+        logger.info(
+            "[video] Gemini cooldown активний (%s год) — пропуск",
+            VIDEO_GEMINI_COOLDOWN_HOURS,
+        )
+        return None
 
     persona     = pick_persona()
     used_topics = await get_used_topics(RUBRIC_KEY)
@@ -313,11 +352,26 @@ async def generate_video() -> dict | None:
         VIDEO_PUBLISHED_AFTER_HOURS * 2,
     )
 
-    top_videos = sorted(
+    ranked = sorted(
         new_videos,
         key=lambda video: _video_rank(video, recent_news_titles),
         reverse=True,
-    )[:7]
+    )
+    best_score = _video_rank(ranked[0], recent_news_titles)[0]
+    if best_score < VIDEO_MIN_RANK_SCORE:
+        logger.info(
+            "[video] Найкращий score=%s < %s — Gemini не викликаємо",
+            best_score,
+            VIDEO_MIN_RANK_SCORE,
+        )
+        return None
+
+    top_videos = [
+        v for v in ranked
+        if _video_rank(v, recent_news_titles)[0] >= VIDEO_MIN_RANK_SCORE
+    ][:7]
+    if not top_videos:
+        return None
 
     videos_str = "\n".join(
         (
@@ -365,6 +419,9 @@ async def generate_video() -> dict | None:
 }
 """
 
+    # Фіксуємо cooldown ДО виклику, щоб паралельні цикли не спамили Gemini.
+    await _mark_gemini_attempted()
+
     try:
         data = await generate_json(prompt)
     except ValueError as exc:
@@ -375,16 +432,19 @@ async def generate_video() -> dict | None:
         return None
 
     video_id = (data.get("video_id") or "").strip()
+    candidate_ids = [v["video_id"] for v in top_videos]
 
     # LLM свідомо відмовився — жодне відео не варте публікації.
     if not video_id:
-        logger.info("[video] Модель відхилила всі кандидати — пропускаємо публікацію")
+        logger.info("[video] Модель відхилила всі кандидати — негативний кеш на %s с", VIDEO_REJECT_TTL_SEC)
+        await _mark_rejected(candidate_ids)
         return None
 
     # Перевіряємо що відео є в нашому списку; якщо ні — не вигадуємо, пропускаємо.
     selected = next((v for v in top_videos if v["video_id"] == video_id), None)
     if selected is None:
-        logger.info("[video] Обраний video_id не зі списку — пропускаємо публікацію")
+        logger.info("[video] Обраний video_id не зі списку — негативний кеш кандидатів")
+        await _mark_rejected(candidate_ids)
         return None
 
     post_with_link = data["post"] + f"\nhttps://youtu.be/{selected['video_id']}"

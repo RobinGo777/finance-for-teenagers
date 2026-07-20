@@ -157,9 +157,9 @@ class MonitorTests(unittest.TestCase):
 class ScheduleTests(unittest.TestCase):
     def test_every_scheduled_rubric_has_generator(self) -> None:
         scheduled = {
-            rubric
+            slot["rubric"]
             for day in SCHEDULE.values()
-            for rubric in day["rubrics"]
+            for slot in day
         }
 
         self.assertTrue(scheduled)

@@ -1,13 +1,11 @@
 import asyncio
 import hashlib
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import pytz
 
 from config import (
-    MONITOR_INTERVAL_HOURS,
-    MONITOR_QUIET_START,
-    MONITOR_QUIET_END,
+    MONITOR_HOURS,
     MONITOR_MAX_PER_DAY,
     TIMEZONE,
 )
@@ -50,17 +48,75 @@ BREAKING_MIN_KEYWORDS = [
 # ГОЛОВНИЙ ЦИКЛ МОНІТОРИНГУ
 # ─────────────────────────────────────────
 
+def _next_slot_datetime(
+    now: datetime,
+    last_fired: tuple[date, int] | None,
+) -> datetime:
+    """Наступний слот MONITOR_HOURS; у поточному слоті без last_fired — одразу."""
+    hours = sorted(MONITOR_HOURS)
+    for day_offset in range(0, 3):
+        day = (now + timedelta(days=day_offset)).date()
+        for hour in hours:
+            key = (day, hour)
+            if last_fired == key:
+                continue
+            slot = now.replace(
+                year=day.year,
+                month=day.month,
+                day=day.day,
+                hour=hour,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if day_offset == 0 and hour == now.hour:
+                return now
+            if slot > now:
+                return slot
+    # fallback: перший слот через 3 дні (не має статись)
+    day = (now + timedelta(days=3)).date()
+    return now.replace(
+        year=day.year, month=day.month, day=day.day,
+        hour=hours[0], minute=0, second=0, microsecond=0,
+    )
+
+
 async def start_monitor() -> None:
     """
-    Безкінечний цикл — перевіряє нові матеріали кожні N годин.
-    Не працює вночі (00:00 — 07:00 Київ).
+    Безкінечний цикл — перевіряє матеріали у фіксовані години
+    (11:00, 14:00, 17:00, 20:00 Київ).
     """
-    logger.info("[monitor] Запущено реалтайм моніторинг")
+    logger.info(
+        "[monitor] Запущено реалтайм моніторинг (слоти %s Київ)",
+        ", ".join(f"{h:02d}:00" for h in sorted(MONITOR_HOURS)),
+    )
+
+    last_fired: tuple[date, int] | None = None
 
     while True:
         try:
-            await asyncio.sleep(MONITOR_INTERVAL_HOURS * 3600)
+            now = datetime.now(KYIV)
+            target = _next_slot_datetime(now, last_fired)
+            wait = (target - now).total_seconds()
+            if wait > 0:
+                logger.info(
+                    "[monitor] Наступний цикл о %s (через %.0f с)",
+                    target.strftime("%H:%M"),
+                    wait,
+                )
+                await asyncio.sleep(wait)
+
+            now = datetime.now(KYIV)
+            if now.hour not in MONITOR_HOURS:
+                continue
+
+            slot_key = (now.date(), now.hour)
+            if last_fired == slot_key:
+                await asyncio.sleep(30)
+                continue
+
             await run_monitor_cycle()
+            last_fired = slot_key
         except asyncio.CancelledError:
             logger.info("[monitor] Зупинено")
             break
@@ -71,11 +127,7 @@ async def start_monitor() -> None:
 
 
 async def run_monitor_cycle() -> None:
-    """Один цикл перевірки — викликається кожні 2 години."""
-
-    # Перевіряємо тихий час
-    if _is_quiet_time():
-        return
+    """Один цикл перевірки — у слотах MONITOR_HOURS."""
 
     # Перевіряємо паузу
     paused = await redis_get("settings:paused")
@@ -196,13 +248,3 @@ async def _check_github_trending() -> None:
 
     except Exception as e:
         logger.exception("[monitor] Помилка GitHub trending: %s", safe_error_text(e))
-
-
-# ─────────────────────────────────────────
-# ДОПОМІЖНІ ФУНКЦІЇ
-# ─────────────────────────────────────────
-
-def _is_quiet_time() -> bool:
-    """Повертає True якщо зараз тихий час (не публікуємо)."""
-    now_hour = datetime.now(KYIV).hour
-    return MONITOR_QUIET_START <= now_hour < MONITOR_QUIET_END

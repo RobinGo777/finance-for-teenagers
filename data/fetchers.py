@@ -1,6 +1,7 @@
 import asyncio
 import feedparser
 import httpx
+import logging
 from datetime import datetime, timedelta, timezone
 from config import (
     COINGECKO_URL,
@@ -13,6 +14,14 @@ from config import (
     RSS_FEEDS,
     YOUTUBE_MIN_VIEWS,
 )
+from utils.http_safe import redact_secrets
+
+logger = logging.getLogger(__name__)
+
+
+class YouTubeQuotaExceeded(Exception):
+    """YouTube Data API повернув 429 — квота/rate limit вичерпано."""
+
 
 # ─────────────────────────────────────────
 # СПІЛЬНИЙ HTTP-КЛІЄНТ (пул з'єднань)
@@ -36,6 +45,19 @@ async def close() -> None:
     _client = None
 
 
+def _raise_for_status(response: httpx.Response) -> None:
+    """raise_for_status без секретів у повідомленні (key=/apiKey= у URL)."""
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        safe_url = redact_secrets(str(error.request.url))
+        raise httpx.HTTPStatusError(
+            f"HTTP {error.response.status_code} for '{safe_url}'",
+            request=error.request,
+            response=error.response,
+        ) from None
+
+
 # ─────────────────────────────────────────
 # COINGECKO — курси крипти
 # ─────────────────────────────────────────
@@ -50,7 +72,7 @@ async def fetch_crypto(coins: list = ["bitcoin", "ethereum", "solana"]) -> dict:
         "include_24hr_change": "true",
     }
     r = await _get_client().get(url, params=params)
-    r.raise_for_status()
+    _raise_for_status(r)
     return r.json()
 
 
@@ -58,7 +80,7 @@ async def fetch_trending_crypto() -> list:
     """Топ трендових монет на CoinGecko прямо зараз."""
     url = f"{COINGECKO_URL}/search/trending"
     r = await _get_client().get(url)
-    r.raise_for_status()
+    _raise_for_status(r)
     coins = r.json().get("coins", [])
     return [c["item"]["name"] for c in coins[:5]]
 
@@ -71,7 +93,7 @@ async def fetch_nbu_rates(currencies: list = ["USD", "EUR", "PLN"]) -> dict:
     """Повертає офіційний курс НБУ для вказаних валют."""
     # NBU очікує прапорець `?json` без значення; `?json=` дає 404.
     r = await _get_client().get(f"{NBU_URL}?json")
-    r.raise_for_status()
+    _raise_for_status(r)
     all_rates = r.json()
     return {
         item["cc"]: item["rate"]
@@ -97,7 +119,7 @@ async def fetch_fred(series_id: str, api_key: str) -> dict:
         "limit": 1,
     }
     r = await _get_client().get(FRED_URL, params=params)
-    r.raise_for_status()
+    _raise_for_status(r)
     observations = r.json().get("observations", [])
     if observations:
         return {"series_id": series_id, "value": observations[0]["value"], "date": observations[0]["date"]}
@@ -113,7 +135,7 @@ async def fetch_world_bank_gdp(country_code: str = "UA") -> dict:
     url = f"{WORLD_BANK_URL}/country/{country_code}/indicator/NY.GDP.MKTP.CD"
     params = {"format": "json", "per_page": 1, "mrv": 1}
     r = await _get_client().get(url, params=params)
-    r.raise_for_status()
+    _raise_for_status(r)
     data = r.json()
     if len(data) > 1 and data[1]:
         item = data[1][0]
@@ -137,7 +159,7 @@ async def fetch_news(query: str = "AI technology finance", language: str = "en",
         "from": (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     r = await _get_client().get(url, params=params)
-    r.raise_for_status()
+    _raise_for_status(r)
     articles = r.json().get("articles", [])
     return [
         {
@@ -197,7 +219,7 @@ async def fetch_github_trending(topic: str = "artificial-intelligence") -> list:
     }
     headers = {"Accept": "application/vnd.github+json"}
     r = await _get_client().get(GITHUB_API_URL, params=params, headers=headers)
-    r.raise_for_status()
+    _raise_for_status(r)
     items = r.json().get("items", [])
     return [
         {
@@ -224,6 +246,7 @@ async def fetch_youtube_videos(
     """
     Шукає свіжі короткі відео на YouTube.
     Фільтрує по мінімальній кількості переглядів (min_views, за замовч. YOUTUBE_MIN_VIEWS).
+    При 429 піднімає YouTubeQuotaExceeded — викликач має зупинити подальші пошуки.
     """
     views_threshold = YOUTUBE_MIN_VIEWS if min_views is None else min_views
     published_after = (
@@ -244,7 +267,9 @@ async def fetch_youtube_videos(
     }
 
     r = await _get_client().get(search_url, params=search_params)
-    r.raise_for_status()
+    if r.status_code == 429:
+        raise YouTubeQuotaExceeded("YouTube Search API: 429 Too Many Requests")
+    _raise_for_status(r)
     search_data = r.json()
 
     video_ids = [item["id"]["videoId"] for item in search_data.get("items", [])]
@@ -259,7 +284,9 @@ async def fetch_youtube_videos(
         "key": YOUTUBE_API_KEY,
     }
     r = await _get_client().get(stats_url, params=stats_params)
-    r.raise_for_status()
+    if r.status_code == 429:
+        raise YouTubeQuotaExceeded("YouTube Videos API: 429 Too Many Requests")
+    _raise_for_status(r)
     stats_data = r.json()
 
     videos = []
@@ -293,7 +320,7 @@ async def fetch_reddit(subreddit: str = "technology", limit: int = 5) -> list:
     headers = {"User-Agent": "FinProBot/1.0"}
     params = {"limit": limit}
     r = await _get_client().get(url, headers=headers, params=params)
-    r.raise_for_status()
+    _raise_for_status(r)
     posts = r.json()["data"]["children"]
     return [
         {

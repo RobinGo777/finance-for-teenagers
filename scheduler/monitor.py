@@ -22,6 +22,7 @@ from data.fetchers import fetch_all_rss, fetch_news, fetch_github_trending
 from generators.video import generate_video
 from generators.ai_news import generate_ai_news
 from bot.publisher import publish, notify_moderator
+from utils.http_safe import safe_error_text
 
 KYIV = pytz.timezone(TIMEZONE)
 logger = logging.getLogger(__name__)
@@ -64,8 +65,8 @@ async def start_monitor() -> None:
             logger.info("[monitor] Зупинено")
             break
         except Exception as e:
-            logger.exception("[monitor] Помилка циклу: %s", e)
-            await notify_moderator(f"⚠️ Збій циклу моніторингу: {e}")
+            logger.exception("[monitor] Помилка циклу: %s", safe_error_text(e))
+            await notify_moderator(f"⚠️ Збій циклу моніторингу: {safe_error_text(e)}")
             await asyncio.sleep(60)
 
 
@@ -96,7 +97,11 @@ async def run_monitor_cycle() -> None:
         try:
             await check()
         except Exception as e:
-            logger.exception("[monitor] Помилка перевірки %s: %s", check.__name__, e)
+            logger.exception(
+                "[monitor] Помилка перевірки %s: %s",
+                check.__name__,
+                safe_error_text(e),
+            )
 
 
 # ─────────────────────────────────────────
@@ -114,7 +119,7 @@ async def _check_video() -> None:
                 await increment_monitor_count()
                 logger.info("[monitor] Відео опубліковано: %s", post_data.get("topic"))
     except Exception as e:
-        logger.exception("[monitor] Помилка відео: %s", e)
+        logger.exception("[monitor] Помилка відео: %s", safe_error_text(e))
 
 
 async def _check_breaking_news() -> None:
@@ -153,7 +158,7 @@ async def _check_breaking_news() -> None:
                 return  # одна новина за цикл
 
     except Exception as e:
-        logger.exception("[monitor] Помилка breaking news: %s", e)
+        logger.exception("[monitor] Помилка breaking news: %s", safe_error_text(e))
 
 
 async def _check_github_trending() -> None:
@@ -190,7 +195,7 @@ async def _check_github_trending() -> None:
                 return
 
     except Exception as e:
-        logger.exception("[monitor] Помилка GitHub trending: %s", e)
+        logger.exception("[monitor] Помилка GitHub trending: %s", safe_error_text(e))
 
 
 # ─────────────────────────────────────────

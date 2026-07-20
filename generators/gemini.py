@@ -95,6 +95,35 @@ async def _request_model(model: str, payload: dict) -> str:
         raise
 
 
+def _is_fatal_auth_error(error: Exception) -> bool:
+    """True лише для зламаного API-ключа — тоді fallback між моделями безглуздий.
+
+    403 на конкретну модель (немає доступу / модель недоступна, напр.
+    gemini-3.5-flash) — НЕ фатальна: пробуємо наступну з GEMINI_MODELS.
+    """
+    if not isinstance(error, httpx.HTTPStatusError):
+        return False
+    status = error.response.status_code
+    if status == 401:
+        return True
+    if status != 403:
+        return False
+    try:
+        err = error.response.json().get("error", {})
+        text = f"{err.get('status', '')} {err.get('message', '')}".lower()
+    except Exception:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "api key not valid",
+            "api_key_invalid",
+            "invalid api key",
+            "api key expired",
+        )
+    )
+
+
 async def _do_request(model: str, payload: dict) -> str:
     """Виконує один запит до конкретної моделі та дістає весь текст відповіді."""
     response = await _get_client().post(
@@ -102,11 +131,6 @@ async def _do_request(model: str, payload: dict) -> str:
         headers={"x-goog-api-key": GEMINI_API_KEY},
         json=payload,
     )
-
-    # Інший model fallback не виправить невірний/заблокований API-ключ.
-    if response.status_code in (401, 403):
-        response.raise_for_status()
-
     response.raise_for_status()
     data = response.json()
 
@@ -182,9 +206,16 @@ async def generate(prompt: str, use_search: bool = False) -> str:
                 logger.info("Gemini відповідь згенеровано моделлю %s", model)
                 return text
             except httpx.HTTPStatusError as error:
-                if error.response.status_code in (401, 403):
+                if _is_fatal_auth_error(error):
                     raise
                 last_exc = error
+                # 403 на модель (недоступна / немає доступу) — одразу наступна.
+                if error.response.status_code == 403:
+                    logger.warning(
+                        "Gemini %s недоступна (403) — перемикаємось на резервну",
+                        model,
+                    )
+                    break
             except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
                 last_exc = error
 
@@ -264,9 +295,15 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
                 logger.info("Gemini JSON згенеровано моделлю %s", model)
                 return result
             except httpx.HTTPStatusError as error:
-                if error.response.status_code in (401, 403):
+                if _is_fatal_auth_error(error):
                     raise
                 last_exc = error
+                if error.response.status_code == 403:
+                    logger.warning(
+                        "Gemini JSON %s недоступна (403) — перемикаємось на резервну",
+                        model,
+                    )
+                    break
             except json.JSONDecodeError as error:
                 last_exc = error
             except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
@@ -280,7 +317,10 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
                 last_exc,
             )
             if attempt < MODEL_RETRIES:
+                # Повтор тієї ж моделі: тимчасові HTTP-помилки та невалідний JSON.
                 await _sleep_before_retry(attempt, last_exc)
+                continue
+            break
 
         logger.warning("JSON fallback: перемикання з моделі %s", model)
 

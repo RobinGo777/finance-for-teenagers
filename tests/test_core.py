@@ -3,6 +3,8 @@ import unittest
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from bot.publisher import (
     _clean_poll_options,
     _clean_poll_question,
@@ -18,12 +20,13 @@ from generators.video import (
     _video_rank,
 )
 from bot.moderator import get_test_rubrics
-from config import SCHEDULE
+from config import SCHEDULE, VIDEO_SEARCH_QUERIES_PER_RUN
 from data import redis_client
 from generators import gemini
 from images.generator import generate_post_image
 from scheduler.daily_scheduler import GENERATORS
 from scheduler.monitor import _stable_id
+from utils.http_safe import redact_secrets, safe_error_text
 
 
 class PublisherHelpersTests(unittest.TestCase):
@@ -92,16 +95,24 @@ class PublisherHelpersTests(unittest.TestCase):
 
 
 class VideoScoringTests(unittest.TestCase):
-    def test_daily_queries_cover_every_category_and_rotate(self) -> None:
+    def test_daily_queries_rotate_subset_not_all_categories(self) -> None:
         first_day = _queries_for_day(date(2026, 7, 19))
         next_day = _queries_for_day(date(2026, 7, 20))
 
-        self.assertEqual(
-            {category for category, _ in first_day},
-            set(SEARCH_QUERY_GROUPS),
+        self.assertEqual(len(first_day), VIDEO_SEARCH_QUERIES_PER_RUN)
+        self.assertEqual(len(next_day), VIDEO_SEARCH_QUERIES_PER_RUN)
+        self.assertLessEqual(VIDEO_SEARCH_QUERIES_PER_RUN, len(SEARCH_QUERY_GROUPS))
+        self.assertTrue(
+            {category for category, _ in first_day}.issubset(SEARCH_QUERY_GROUPS)
         )
-        self.assertEqual(len(first_day), len(SEARCH_QUERY_GROUPS))
         self.assertNotEqual(first_day, next_day)
+
+        # За тиждень ротація має покрити всі категорії.
+        seen: set[str] = set()
+        for offset in range(len(SEARCH_QUERY_GROUPS)):
+            day = date(2026, 7, 19 + offset)
+            seen.update(category for category, _ in _queries_for_day(day))
+        self.assertEqual(seen, set(SEARCH_QUERY_GROUPS))
 
     def test_visual_trusted_video_outranks_talking_news(self) -> None:
         demo = {
@@ -251,6 +262,70 @@ class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in request.await_args_list],
             ["primary", "fallback"],
         )
+
+    async def test_model_403_switches_to_fallback(self) -> None:
+        """Недоступна модель (403) не валить весь ланцюжок — беремо наступну."""
+        forbidden = httpx.HTTPStatusError(
+            "Forbidden",
+            request=httpx.Request("POST", "https://example.test"),
+            response=httpx.Response(
+                403,
+                json={"error": {"message": "model not found", "status": "NOT_FOUND"}},
+            ),
+        )
+
+        async def request(model: str, payload: dict) -> str:
+            if model == "broken":
+                raise forbidden
+            return '{"ok": true}'
+
+        with (
+            patch.object(gemini, "GEMINI_MODELS", ["broken", "fallback"]),
+            patch.object(gemini, "MODEL_RETRIES", 2),
+            patch.object(gemini, "_request_model", new=request),
+        ):
+            result = await gemini.generate_json("test")
+
+        self.assertEqual(result, {"ok": True})
+
+    def test_fatal_auth_detects_invalid_key_not_model_403(self) -> None:
+        invalid_key = httpx.HTTPStatusError(
+            "Forbidden",
+            request=httpx.Request("POST", "https://example.test"),
+            response=httpx.Response(
+                403,
+                json={
+                    "error": {
+                        "message": "API key not valid. Please pass a valid API key.",
+                        "status": "INVALID_ARGUMENT",
+                    }
+                },
+            ),
+        )
+        model_denied = httpx.HTTPStatusError(
+            "Forbidden",
+            request=httpx.Request("POST", "https://example.test"),
+            response=httpx.Response(
+                403,
+                json={"error": {"message": "models/gemini-3.5-flash is not found"}},
+            ),
+        )
+        self.assertTrue(gemini._is_fatal_auth_error(invalid_key))
+        self.assertFalse(gemini._is_fatal_auth_error(model_denied))
+
+
+class SecretRedactionTests(unittest.TestCase):
+    def test_redacts_youtube_and_newsapi_keys(self) -> None:
+        raw = (
+            "Client error for url "
+            "'https://www.googleapis.com/youtube/v3/search?q=ai&key=AIzaSySECRET'"
+        )
+        self.assertIn("key=***", redact_secrets(raw))
+        self.assertNotIn("AIzaSySECRET", redact_secrets(raw))
+
+        news = "https://newsapi.org/v2/everything?apiKey=fa170a69secret&q=AI"
+        self.assertIn("apiKey=***", redact_secrets(news))
+        self.assertNotIn("fa170a69secret", safe_error_text(Exception(news)))
 
 
 if __name__ == "__main__":

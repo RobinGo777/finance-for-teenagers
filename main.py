@@ -16,11 +16,39 @@ from scheduler.monitor import start_monitor
 # ЛОГУВАННЯ
 # ─────────────────────────────────────────
 
+class _RedactSecretsFilter(logging.Filter):
+    """Не пускає API-ключі з query string у логи (навіть через httpx/traceback)."""
+
+    @staticmethod
+    def _redact_value(value: object) -> object:
+        from utils.http_safe import redact_secrets
+
+        if isinstance(value, str):
+            return redact_secrets(value)
+        # httpx кладе URL-об'єкт у args: HTTP Request: GET <URL>
+        text = str(value)
+        redacted = redact_secrets(text)
+        return redacted if redacted != text else value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = self._redact_value(record.msg)  # type: ignore[assignment]
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {
+                    k: self._redact_value(v) for k, v in record.args.items()
+                }
+            else:
+                record.args = tuple(self._redact_value(a) for a in record.args)
+        return True
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.getLogger().addFilter(_RedactSecretsFilter())
 logger = logging.getLogger(__name__)
 
 

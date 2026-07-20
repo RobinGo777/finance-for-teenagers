@@ -1,10 +1,19 @@
+import hashlib
+import json
 import re
 import logging
 from datetime import date
 
 from generators.gemini import generate_json, pick_persona, build_base_prompt
-from data.redis_client import get_used_topics, save_topic, is_published, mark_published
-from data.fetchers import fetch_youtube_videos, fetch_news
+from data.redis_client import (
+    get_used_topics,
+    save_topic,
+    is_published,
+    mark_published,
+    get as redis_get,
+    set_value as redis_set,
+)
+from data.fetchers import fetch_youtube_videos, fetch_news, YouTubeQuotaExceeded
 from config import (
     VISUAL_TEMPLATES,
     TRUSTED_VIDEO_CHANNEL_HINTS,
@@ -16,7 +25,10 @@ from config import (
     NEWS_CHANNEL_HINTS,
     VIDEO_ENGAGING_TERMS,
     VIDEO_LOW_VALUE_TERMS,
+    VIDEO_SEARCH_QUERIES_PER_RUN,
+    VIDEO_SEARCH_CACHE_TTL_SEC,
 )
+from utils.http_safe import safe_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +105,54 @@ def _term_score(text: str, terms: list[str]) -> int:
 
 
 def _queries_for_day(day: date | None = None) -> list[tuple[str, str]]:
-    """По одному запиту з кожної теми; вибір змінюється щодня."""
+    """Ротація тем: N запитів на цикл, щоб не спалити YouTube Search квоту.
+
+    Кожен день зсуває стартову категорію, тож за кілька днів покриваємо всі теми.
+    """
     current = day or date.today()
     seed = current.toordinal()
-    return [
-        (category, queries[(seed + offset) % len(queries)])
-        for offset, (category, queries) in enumerate(SEARCH_QUERY_GROUPS.items())
-    ]
+    categories = list(SEARCH_QUERY_GROUPS.items())
+    n = min(VIDEO_SEARCH_QUERIES_PER_RUN, len(categories))
+    start = seed % len(categories)
+    selected: list[tuple[str, str]] = []
+    for i in range(n):
+        category, queries = categories[(start + i) % len(categories)]
+        query = queries[(seed + i) % len(queries)]
+        selected.append((category, query))
+    return selected
+
+
+def _search_cache_key(query: str, hours: int, min_views: int) -> str:
+    digest = hashlib.sha256(
+        f"{query}|{hours}|{min_views}".encode()
+    ).hexdigest()[:16]
+    return f"youtube:search:{digest}"
+
+
+async def _cached_youtube_search(
+    query: str,
+    *,
+    hours: int,
+    min_views: int,
+    max_results: int = 6,
+) -> list[dict]:
+    """Пошук з Redis-кешем — повторні цикли монітора не палять квоту."""
+    cache_key = _search_cache_key(query, hours, min_views)
+    cached = await redis_get(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except json.JSONDecodeError:
+            pass
+
+    videos = await fetch_youtube_videos(
+        query=query,
+        max_results=max_results,
+        published_after_hours=hours,
+        min_views=min_views,
+    )
+    await redis_set(cache_key, json.dumps(videos), ex=VIDEO_SEARCH_CACHE_TTL_SEC)
+    return videos
 
 
 def _is_trusted_channel(channel: str) -> bool:
@@ -147,11 +200,11 @@ async def _collect_videos(min_views: int, hours: int) -> list[dict]:
     collected: dict[str, dict] = {}
     for category, query in _queries_for_day():
         try:
-            videos = await fetch_youtube_videos(
-                query=query,
-                max_results=6,
-                published_after_hours=hours,
+            videos = await _cached_youtube_search(
+                query,
+                hours=hours,
                 min_views=min_views,
+                max_results=6,
             )
             for v in videos:
                 existing = collected.get(v["video_id"])
@@ -162,8 +215,17 @@ async def _collect_videos(min_views: int, hours: int) -> list[dict]:
                 else:
                     v["categories"] = [category]
                     collected[v["video_id"]] = v
+        except YouTubeQuotaExceeded:
+            logger.warning(
+                "[video] YouTube квота/429 — зупиняємо подальші пошуки цього циклу"
+            )
+            break
         except Exception as exc:
-            logger.warning("[video] YouTube-пошук '%s' не вдався: %s", query, exc)
+            logger.warning(
+                "[video] YouTube-пошук '%s' не вдався: %s",
+                query,
+                safe_error_text(exc),
+            )
             continue
     return list(collected.values())
 

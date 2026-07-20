@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from config import TELEGRAM_BOT_TOKEN
+from config import TELEGRAM_BOT_TOKEN, GEMINI_MODELS
 from bot.moderator import router as moderator_router
 from bot.publisher import bot
 from scheduler.daily_scheduler import setup_scheduler
@@ -48,7 +48,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logging.getLogger().addFilter(_RedactSecretsFilter())
+_secret_filter = _RedactSecretsFilter()
+for _logger_name in ("", "httpx", "httpcore"):
+    logging.getLogger(_logger_name).addFilter(_secret_filter)
 logger = logging.getLogger(__name__)
 
 
@@ -87,6 +89,7 @@ async def start_keepalive_server() -> None:
 
 async def main() -> None:
     logger.info("🚀 Запуск ФінПро бота...")
+    logger.info("Gemini models (normalized): %s", ", ".join(GEMINI_MODELS))
 
     # Dispatcher
     dp = Dispatcher()

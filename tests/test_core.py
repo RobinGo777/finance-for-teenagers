@@ -20,7 +20,7 @@ from generators.video import (
     _video_rank,
 )
 from bot.moderator import get_test_rubrics
-from config import SCHEDULE, VIDEO_SEARCH_QUERIES_PER_RUN
+from config import SCHEDULE, VIDEO_SEARCH_QUERIES_PER_RUN, _normalize_gemini_models
 from data import redis_client
 from generators import gemini
 from images.generator import generate_post_image
@@ -221,7 +221,12 @@ class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
             "application/json",
         )
         self.assertNotIn("tools", payload)
+        self.assertNotIn("thinkingConfig", payload["generationConfig"])
         self.assertNotIn("key=", gemini._model_url("gemini-test"))
+
+    def test_text_mode_includes_thinking_config(self) -> None:
+        payload = gemini._build_payload("test", use_search=False, json_mode=False)
+        self.assertIn("thinkingConfig", payload["generationConfig"])
 
     def test_json_mode_never_enables_search_tool(self) -> None:
         # google_search + JSON-вивід несумісні → порожня відповідь. У JSON-режимі
@@ -312,6 +317,27 @@ class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(gemini._is_fatal_auth_error(invalid_key))
         self.assertFalse(gemini._is_fatal_auth_error(model_denied))
+
+
+class GeminiModelConfigTests(unittest.TestCase):
+    def test_normalize_puts_flash_first_and_pro_last(self) -> None:
+        raw = [
+            "gemini-3.5-flash",
+            "gemini-3.1-pro-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ]
+        ordered = _normalize_gemini_models(raw)
+        self.assertEqual(ordered[0], "gemini-2.5-flash")
+        self.assertIn("gemini-2.0-flash", ordered)
+        self.assertLess(
+            ordered.index("gemini-2.5-flash"),
+            ordered.index("gemini-2.5-pro"),
+        )
+        self.assertLess(
+            ordered.index("gemini-3.5-flash"),
+            ordered.index("gemini-3.1-pro-preview"),
+        )
 
 
 class SecretRedactionTests(unittest.TestCase):

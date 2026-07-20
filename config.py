@@ -15,17 +15,53 @@ MODERATOR_CHAT_ID    = int(os.getenv("MODERATOR_CHAT_ID", "0"))  # твій Tele
 # GEMINI API
 # ─────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODELS = [
+
+# Flash-моделі — окремі денні пули квоти; Pro/preview швидко дають 429.
+_GEMINI_FLASH_ORDER = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+)
+
+
+def _normalize_gemini_models(raw: list[str]) -> list[str]:
+    """Flash спочатку, Pro/preview в кінці, gemini-2.0-flash завжди як запасний."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    for model in _GEMINI_FLASH_ORDER:
+        if model in raw:
+            ordered.append(model)
+            seen.add(model)
+
+    for model in raw:
+        if model in seen:
+            continue
+        if "-pro" in model or "preview" in model:
+            continue
+        ordered.append(model)
+        seen.add(model)
+
+    for model in raw:
+        if model not in seen:
+            ordered.append(model)
+            seen.add(model)
+
+    if "gemini-2.0-flash" not in seen:
+        ordered.append("gemini-2.0-flash")
+
+    return ordered or ["gemini-2.5-flash", "gemini-2.0-flash"]
+
+
+_GEMINI_RAW = [
     model.strip().removeprefix("models/")
     for model in os.getenv(
         "GEMINI_MODELS",
-        # Обидві flash-моделі мають по 1500 запитів/день, але це ОКРЕМІ пули,
-        # тож fallback подвоює денну ємність. Pro не беремо: на безкоштовному
-        # тарифі лише 50/день — це лише додає 429. Новіші моделі — через env.
         "gemini-2.5-flash,gemini-2.0-flash",
     ).split(",")
     if model.strip()
-] or ["gemini-2.5-flash"]
+]
+GEMINI_MODELS = _normalize_gemini_models(_GEMINI_RAW)
 
 # ─────────────────────────────────────────
 # UPSTASH REDIS

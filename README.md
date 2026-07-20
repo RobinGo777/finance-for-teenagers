@@ -42,7 +42,9 @@ Health endpoint працює на `http://localhost:${PORT:-10000}/`.
 
 ### Gemini fallback
 
-Моделі задаються через `GEMINI_MODELS` у порядку пріоритету. Типовий ланцюжок:
+Моделі задаються через `GEMINI_MODELS` у порядку пріоритету. Код
+автоматично ставить **flash** першими (`gemini-2.5-flash`, `gemini-2.0-flash`),
+а Pro/preview — в кінець (щоб не витрачати квоту на 429). Рекомендовано:
 
 1. `gemini-2.5-flash`
 2. `gemini-2.0-flash`

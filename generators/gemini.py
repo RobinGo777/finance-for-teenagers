@@ -48,17 +48,18 @@ def _model_url(model: str) -> str:
 
 
 def _build_payload(prompt: str, use_search: bool, json_mode: bool = False) -> dict:
+    gen_config: dict = {
+        "temperature": 0.85,
+        "maxOutputTokens": 4096 if json_mode else 8192,
+    }
+    # thinkingConfig лише для текстових постів. У JSON-режимі (короткі відповіді)
+    # часто дає 403/порожній вивід на flash-моделях безкоштовного тарифу.
+    if not json_mode:
+        gen_config["thinkingConfig"] = {"thinkingBudget": 2048}
+
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.85,
-            # Gemini 2.5/3.x рахують thinking-токени у межах maxOutputTokens.
-            # Даємо великий бюджет, щоб після «роздумів» лишалось місце на текст,
-            # інакше відповідь приходить порожня (finishReason=MAX_TOKENS).
-            "maxOutputTokens": 8192,
-            # Обмежуємо самі роздуми, щоб гарантовано лишити місце на вивід.
-            "thinkingConfig": {"thinkingBudget": 2048},
-        },
+        "generationConfig": gen_config,
     }
     if json_mode:
         payload["generationConfig"]["responseMimeType"] = "application/json"
@@ -82,15 +83,19 @@ def _payload_without_thinking(payload: dict) -> dict:
 async def _request_model(model: str, payload: dict) -> str:
     """Запит до моделі зі стійкістю до непідтримуваного thinkingConfig.
 
-    Якщо модель не знає поля thinkingConfig і повертає 400 — повторюємо той
-    самий запит без нього (тоді працює лише збільшений maxOutputTokens).
+    Якщо модель не знає поля thinkingConfig і повертає 400/403 — повторюємо
+    той самий запит без нього.
     """
     try:
         return await _do_request(model, payload)
     except httpx.HTTPStatusError as error:
         has_thinking = "thinkingConfig" in payload.get("generationConfig", {})
-        if error.response.status_code == 400 and has_thinking:
-            logger.warning("%s не підтримує thinkingConfig — повтор без нього", model)
+        if error.response.status_code in (400, 403) and has_thinking:
+            logger.warning(
+                "%s відхилила thinkingConfig (%s) — повтор без нього",
+                model,
+                error.response.status_code,
+            )
             return await _do_request(model, _payload_without_thinking(payload))
         raise
 
@@ -316,8 +321,9 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
                 MODEL_RETRIES,
                 last_exc,
             )
-            if attempt < MODEL_RETRIES:
-                # Повтор тієї ж моделі: тимчасові HTTP-помилки та невалідний JSON.
+            if attempt < MODEL_RETRIES and (
+                isinstance(last_exc, json.JSONDecodeError) or _should_retry(last_exc)
+            ):
                 await _sleep_before_retry(attempt, last_exc)
                 continue
             break

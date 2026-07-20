@@ -365,7 +365,14 @@ async def generate_video() -> dict | None:
 }
 """
 
-    data = await generate_json(prompt)
+    try:
+        data = await generate_json(prompt)
+    except ValueError as exc:
+        logger.warning(
+            "[video] Gemini недоступний — пропускаємо публікацію: %s",
+            safe_error_text(exc),
+        )
+        return None
 
     video_id = (data.get("video_id") or "").strip()
 

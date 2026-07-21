@@ -16,41 +16,67 @@ MODERATOR_CHAT_ID    = int(os.getenv("MODERATOR_CHAT_ID", "0"))  # твій Tele
 # ─────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# Flash-моделі — окремі денні пули квоти; Pro/preview швидко дають 429.
+# Flash-моделі для текстових постів — пріоритет (перевірено на API-ключі).
 _GEMINI_FLASH_ORDER = (
     "gemini-2.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
     "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-flash-latest",
     "gemini-1.5-flash",
 )
 
+# Спеціалізовані моделі — не для генерації постів (image/tts/embedding/live тощо).
+_GEMINI_MODEL_BLOCKLIST = (
+    "-image",
+    "-tts",
+    "embedding",
+    "-live",
+    "native-audio",
+    "robotics",
+    "computer-use",
+    "omni",
+    "translate",
+    "customtools",
+    "-lite",
+    "lite-latest",
+)
+
+# Скільки моделей максимум пробуємо за один запит (щоб не палити квоту каскадом).
+GEMINI_MAX_MODELS_PER_REQUEST = int(os.getenv("GEMINI_MAX_MODELS_PER_REQUEST", "2"))
+
+
+def _is_usable_text_model(name: str) -> bool:
+    """True лише для flash-моделей генерації тексту."""
+    n = name.lower()
+    if "-pro" in n or n.endswith("pro-latest"):
+        return False
+    return not any(marker in n for marker in _GEMINI_MODEL_BLOCKLIST)
+
 
 def _normalize_gemini_models(raw: list[str]) -> list[str]:
-    """Flash спочатку, Pro/preview в кінці, gemini-2.0-flash завжди як запасний."""
+    """Flash-моделі для постів; Pro/image/tts/live відсіюються."""
+    usable = [m for m in raw if _is_usable_text_model(m)]
     seen: set[str] = set()
     ordered: list[str] = []
 
     for model in _GEMINI_FLASH_ORDER:
-        if model in raw:
+        if model in usable and model not in seen:
             ordered.append(model)
             seen.add(model)
 
-    for model in raw:
-        if model in seen:
-            continue
-        if "-pro" in model or "preview" in model:
-            continue
-        ordered.append(model)
-        seen.add(model)
-
-    for model in raw:
+    for model in usable:
         if model not in seen:
             ordered.append(model)
             seen.add(model)
 
     if "gemini-2.0-flash" not in seen:
         ordered.append("gemini-2.0-flash")
+        seen.add("gemini-2.0-flash")
 
-    return ordered or ["gemini-2.5-flash", "gemini-2.0-flash"]
+    cap = max(1, GEMINI_MAX_MODELS_PER_REQUEST)
+    return ordered[:cap] or ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 
 _GEMINI_RAW = [
@@ -69,6 +95,8 @@ GEMINI_MAX_RETRY_WAIT_SEC = float(os.getenv("GEMINI_MAX_RETRY_WAIT_SEC", "180"))
 # Скільки разів scheduler відкладає рубрику при 429 (через RPM, не денний ліміт).
 GEMINI_SCHEDULE_RETRIES = int(os.getenv("GEMINI_SCHEDULE_RETRIES", "2"))
 GEMINI_SCHEDULE_RETRY_DELAY_SEC = int(os.getenv("GEMINI_SCHEDULE_RETRY_DELAY_SEC", "180"))
+# Глобальна пауза Gemini після вичерпання квоти (сек) — Redis, переживає рестарт.
+GEMINI_GLOBAL_COOLDOWN_SEC = int(os.getenv("GEMINI_GLOBAL_COOLDOWN_SEC", "14400"))
 
 # ─────────────────────────────────────────
 # UPSTASH REDIS
@@ -226,6 +254,7 @@ VIDEO_SEARCH_CACHE_TTL_SEC = 10800    # 3 години (як інтервал м
 
 # Економія Gemini: не питати модель про слабкі/вже відхилені набори.
 VIDEO_MIN_RANK_SCORE = 1              # мін. локальний score топ-кандидата перед Gemini
+VIDEO_MIN_CANDIDATES = 2              # не питати Gemini, якщо лише 1 слабкий кандидат
 VIDEO_GEMINI_COOLDOWN_HOURS = 8       # макс. 1 спроба Gemini для відео за цей період
 VIDEO_REJECT_TTL_SEC = 18 * 3600      # негативний кеш відхилених video_id (18 год)
 

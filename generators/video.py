@@ -4,7 +4,7 @@ import re
 import logging
 from datetime import date
 
-from generators.gemini import generate_json, pick_persona, build_base_prompt
+from generators.gemini import generate_json, pick_persona, build_base_prompt, GeminiQuotaExhausted, is_quota_paused
 from data.redis_client import (
     get_used_topics,
     save_topic,
@@ -28,6 +28,7 @@ from config import (
     VIDEO_SEARCH_QUERIES_PER_RUN,
     VIDEO_SEARCH_CACHE_TTL_SEC,
     VIDEO_MIN_RANK_SCORE,
+    VIDEO_MIN_CANDIDATES,
     VIDEO_GEMINI_COOLDOWN_HOURS,
     VIDEO_REJECT_TTL_SEC,
 )
@@ -318,6 +319,10 @@ async def generate_video() -> dict | None:
         )
         return None
 
+    if await is_quota_paused():
+        logger.info("[video] Глобальна пауза Gemini — пропуск")
+        return None
+
     persona     = pick_persona()
     used_topics = await get_used_topics(RUBRIC_KEY)
 
@@ -370,8 +375,17 @@ async def generate_video() -> dict | None:
         v for v in ranked
         if _video_rank(v, recent_news_titles)[0] >= VIDEO_MIN_RANK_SCORE
     ][:7]
+    if len(top_videos) < VIDEO_MIN_CANDIDATES:
+        logger.info(
+            "[video] Лише %s кандидат(ів) (мін. %s) — Gemini не викликаємо",
+            len(top_videos),
+            VIDEO_MIN_CANDIDATES,
+        )
+        return None
     if not top_videos:
         return None
+
+    candidate_ids = [v["video_id"] for v in top_videos]
 
     videos_str = "\n".join(
         (
@@ -419,20 +433,27 @@ async def generate_video() -> dict | None:
 }
 """
 
-    # Фіксуємо cooldown ДО виклику, щоб паралельні цикли не спамили Gemini.
-    await _mark_gemini_attempted()
-
     try:
         data = await generate_json(prompt)
+    except GeminiQuotaExhausted as exc:
+        await _mark_gemini_attempted()
+        logger.warning(
+            "[video] Gemini квота вичерпана — пропуск: %s",
+            safe_error_text(exc),
+        )
+        return None
     except ValueError as exc:
+        await _mark_gemini_attempted()
+        await _mark_rejected(candidate_ids)
         logger.warning(
             "[video] Gemini недоступний — пропускаємо публікацію: %s",
             safe_error_text(exc),
         )
         return None
 
+    await _mark_gemini_attempted()
+
     video_id = (data.get("video_id") or "").strip()
-    candidate_ids = [v["video_id"] for v in top_videos]
 
     # LLM свідомо відмовився — жодне відео не варте публікації.
     if not video_id:

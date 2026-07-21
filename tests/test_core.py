@@ -320,24 +320,24 @@ class GeminiFallbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GeminiModelConfigTests(unittest.TestCase):
-    def test_normalize_puts_flash_first_and_pro_last(self) -> None:
+    def test_normalize_flash_only_no_pro(self) -> None:
         raw = [
             "gemini-3.5-flash",
             "gemini-3.1-pro-preview",
             "gemini-2.5-pro",
             "gemini-2.5-flash",
+            "gemini-3.5-flash-image",
+            "gemini-embedding-001",
         ]
         ordered = _normalize_gemini_models(raw)
         self.assertEqual(ordered[0], "gemini-2.5-flash")
+        self.assertIn("gemini-3.5-flash", ordered)
         self.assertIn("gemini-2.0-flash", ordered)
-        self.assertLess(
-            ordered.index("gemini-2.5-flash"),
-            ordered.index("gemini-2.5-pro"),
-        )
-        self.assertLess(
-            ordered.index("gemini-3.5-flash"),
-            ordered.index("gemini-3.1-pro-preview"),
-        )
+        self.assertNotIn("gemini-2.5-pro", ordered)
+        self.assertNotIn("gemini-3.1-pro-preview", ordered)
+        self.assertNotIn("gemini-3.5-flash-image", ordered)
+        self.assertNotIn("gemini-embedding-001", ordered)
+        self.assertLessEqual(len(ordered), 3)
 
 
 class GeminiRateLimitTests(unittest.TestCase):

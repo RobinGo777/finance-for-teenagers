@@ -17,12 +17,12 @@ MODERATOR_CHAT_ID    = int(os.getenv("MODERATOR_CHAT_ID", "0"))  # твій Tele
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Flash-моделі для текстових постів — пріоритет.
-# 2.0-flash і 3.5-flash: на багатьох ключах 2.5-flash дає 404 generateContent.
+# 2.0-flash і flash-latest: 3.5-flash часто дає 503/таймаут.
 _GEMINI_FLASH_ORDER = (
     "gemini-2.0-flash",
     "gemini-2.0-flash-001",
-    "gemini-3.5-flash",
     "gemini-flash-latest",
+    "gemini-3.5-flash",
     "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-1.5-flash",
@@ -80,14 +80,14 @@ def _normalize_gemini_models(raw: list[str]) -> list[str]:
         ordered.insert(0, "gemini-2.0-flash")
 
     cap = max(1, GEMINI_MAX_MODELS_PER_REQUEST)
-    return ordered[:cap] or ["gemini-2.0-flash", "gemini-3.5-flash"]
+    return ordered[:cap] or ["gemini-2.0-flash", "gemini-flash-latest"]
 
 
 _GEMINI_RAW = [
     model.strip().removeprefix("models/")
     for model in os.getenv(
         "GEMINI_MODELS",
-        "gemini-2.0-flash,gemini-3.5-flash",
+        "gemini-2.0-flash,gemini-flash-latest",
     ).split(",")
     if model.strip()
 ]

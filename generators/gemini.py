@@ -67,8 +67,21 @@ async def _ensure_not_paused() -> None:
 def _get_client() -> httpx.AsyncClient:
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.AsyncClient(timeout=30)
+        # Gemini інколи думає 30–60+ с; короткий read timeout дає порожній ReadTimeout.
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=20.0, read=90.0, write=30.0, pool=30.0)
+        )
     return _client
+
+
+def _format_exc(error: Exception | None) -> str:
+    """Читабельний текст помилки (ReadTimeout часто має порожній str())."""
+    if error is None:
+        return "невідома помилка"
+    if isinstance(error, httpx.TimeoutException):
+        return f"таймаут очікування відповіді Gemini ({type(error).__name__})"
+    text = str(error).strip()
+    return text or type(error).__name__
 
 
 async def close() -> None:
@@ -360,7 +373,8 @@ async def generate(prompt: str, use_search: bool = False) -> str:
         logger.warning("Перемикання Gemini з %s на резервну модель", model)
 
     raise ValueError(
-        f"Усі Gemini-моделі недоступні: {', '.join(GEMINI_MODELS)}"
+        f"Усі Gemini-моделі недоступні: {', '.join(GEMINI_MODELS)}. "
+        f"Причина: {_format_exc(last_exc)}"
     ) from last_exc
 
 
@@ -466,7 +480,7 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
 
     raise ValueError(
         f"Усі Gemini-моделі повернули помилку або невалідний JSON. "
-        f"Причина: {last_exc}. Остання відповідь:\n{last_raw[:400]}"
+        f"Причина: {_format_exc(last_exc)}. Остання відповідь:\n{last_raw[:400]}"
     ) from last_exc
 
 

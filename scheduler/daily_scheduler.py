@@ -68,6 +68,7 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
 
 def _is_rate_limit_error(error: BaseException) -> bool:
     text = str(error)
+    name = type(error).__name__
     return (
         isinstance(error, GeminiQuotaExhausted)
         or "429" in text
@@ -76,6 +77,10 @@ def _is_rate_limit_error(error: BaseException) -> bool:
         or "Service Unavailable" in text
         or "UNAVAILABLE" in text
         or "RESOURCE_EXHAUSTED" in text
+        or "таймаут" in text.lower()
+        or "Timeout" in name
+        or "ReadTimeout" in text
+        or "ConnectTimeout" in text
     )
 
 

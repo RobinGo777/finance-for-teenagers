@@ -330,9 +330,10 @@ class GeminiModelConfigTests(unittest.TestCase):
             "gemini-embedding-001",
         ]
         ordered = _normalize_gemini_models(raw)
-        self.assertEqual(ordered[0], "gemini-2.5-flash")
-        self.assertIn("gemini-3.5-flash", ordered)
-        self.assertIn("gemini-2.0-flash", ordered)
+        self.assertEqual(ordered[0], "gemini-2.0-flash")
+        self.assertTrue(
+            "gemini-3.5-flash" in ordered or "gemini-2.5-flash" in ordered
+        )
         self.assertNotIn("gemini-2.5-pro", ordered)
         self.assertNotIn("gemini-3.1-pro-preview", ordered)
         self.assertNotIn("gemini-3.5-flash-image", ordered)

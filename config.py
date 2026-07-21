@@ -16,15 +16,15 @@ MODERATOR_CHAT_ID    = int(os.getenv("MODERATOR_CHAT_ID", "0"))  # твій Tele
 # ─────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# Flash-моделі для текстових постів — пріоритет (перевірено на API-ключі).
-# 2.0-flash першим: стабільніший на free tier; 2.5 — резерв.
+# Flash-моделі для текстових постів — пріоритет.
+# 2.0-flash і 3.5-flash: на багатьох ключах 2.5-flash дає 404 generateContent.
 _GEMINI_FLASH_ORDER = (
     "gemini-2.0-flash",
     "gemini-2.0-flash-001",
-    "gemini-2.5-flash",
-    "gemini-flash-latest",
     "gemini-3.5-flash",
+    "gemini-flash-latest",
     "gemini-3-flash-preview",
+    "gemini-2.5-flash",
     "gemini-1.5-flash",
 )
 
@@ -72,19 +72,22 @@ def _normalize_gemini_models(raw: list[str]) -> list[str]:
             ordered.append(model)
             seen.add(model)
 
+    # Завжди тримаємо 2.0-flash у ланцюгу (найстабільніший на free tier).
     if "gemini-2.0-flash" not in seen:
-        ordered.append("gemini-2.0-flash")
-        seen.add("gemini-2.0-flash")
+        ordered.insert(0, "gemini-2.0-flash")
+    elif ordered and ordered[0] != "gemini-2.0-flash" and "gemini-2.0-flash" in ordered:
+        ordered.remove("gemini-2.0-flash")
+        ordered.insert(0, "gemini-2.0-flash")
 
     cap = max(1, GEMINI_MAX_MODELS_PER_REQUEST)
-    return ordered[:cap] or ["gemini-2.5-flash", "gemini-2.0-flash"]
+    return ordered[:cap] or ["gemini-2.0-flash", "gemini-3.5-flash"]
 
 
 _GEMINI_RAW = [
     model.strip().removeprefix("models/")
     for model in os.getenv(
         "GEMINI_MODELS",
-        "gemini-2.0-flash,gemini-2.5-flash",
+        "gemini-2.0-flash,gemini-3.5-flash",
     ).split(",")
     if model.strip()
 ]

@@ -103,6 +103,22 @@ async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
         else:
             logger.info("[scheduler] Рубрика %s не дала контенту цього разу", rubric_key)
     except GeminiQuotaExhausted as e:
+        msg = str(e).lower()
+        if "cooldown" in msg and attempt <= GEMINI_SCHEDULE_RETRIES:
+            delay = GEMINI_SCHEDULE_RETRY_DELAY_SEC * attempt
+            logger.warning(
+                "[scheduler] Gemini cooldown на %s — повтор #%s через %s с",
+                rubric_key,
+                attempt,
+                delay,
+            )
+            await notify_moderator(
+                f"⏳ Gemini пауза — «{rubric_key}» повтор через {delay // 60} хв "
+                f"(спроба {attempt}/{GEMINI_SCHEDULE_RETRIES})."
+            )
+            await asyncio.sleep(delay)
+            await publish_rubric(rubric_key, attempt=attempt + 1)
+            return
         logger.warning("[scheduler] Денний ліміт Gemini для %s: %s", rubric_key, e)
         await notify_moderator(
             f"🛑 Денний ліміт Gemini — рубрика «{rubric_key}» пропущена.\n"

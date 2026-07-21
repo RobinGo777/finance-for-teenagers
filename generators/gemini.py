@@ -45,6 +45,13 @@ async def is_quota_paused() -> bool:
     return bool(await redis_get(_GEMINI_GLOBAL_COOLDOWN_KEY))
 
 
+async def clear_global_quota_cooldown() -> None:
+    """Знімає глобальну паузу Gemini (модератор / після оновлення ключа)."""
+    from data.redis_client import delete
+    await delete(_GEMINI_GLOBAL_COOLDOWN_KEY)
+    logger.info("[gemini] Глобальну паузу Gemini знято")
+
+
 async def set_global_quota_cooldown(seconds: int | None = None) -> None:
     """Ставить глобальну паузу Gemini після вичерпання квоти."""
     ttl = seconds if seconds is not None else GEMINI_GLOBAL_COOLDOWN_SEC
@@ -321,11 +328,11 @@ async def generate(prompt: str, use_search: bool = False) -> str:
                             f"Денний ліміт Gemini вичерпано (останній: {model})"
                         ) from error
                     break
-                # 403 на модель (недоступна / немає доступу) — одразу наступна.
-                if error.response.status_code == 403:
+                if error.response.status_code in (403, 404):
                     logger.warning(
-                        "Gemini %s недоступна (403) — перемикаємось на резервну",
+                        "Gemini %s недоступна (%s) — перемикаємось на резервну",
                         model,
+                        error.response.status_code,
                     )
                     break
             except (httpx.HTTPError, KeyError, IndexError, ValueError) as error:
@@ -347,9 +354,6 @@ async def generate(prompt: str, use_search: bool = False) -> str:
         if isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code == 429:
             await _sleep_before_retry(1, last_exc)
         logger.warning("Перемикання Gemini з %s на резервну модель", model)
-
-    if isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code == 429:
-        await set_global_quota_cooldown(3600)
 
     raise ValueError(
         f"Усі Gemini-моделі недоступні: {', '.join(GEMINI_MODELS)}"
@@ -426,10 +430,11 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
                             f"Денний ліміт Gemini вичерпано (останній: {model})"
                         ) from error
                     break
-                if error.response.status_code == 403:
+                if error.response.status_code in (403, 404):
                     logger.warning(
-                        "Gemini JSON %s недоступна (403) — перемикаємось на резервну",
+                        "Gemini JSON %s недоступна (%s) — перемикаємось на резервну",
                         model,
+                        error.response.status_code,
                     )
                     break
             except json.JSONDecodeError as error:
@@ -454,9 +459,6 @@ async def generate_json(prompt: str, use_search: bool = False) -> dict:
         if isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code == 429:
             await _sleep_before_retry(1, last_exc)
         logger.warning("JSON fallback: перемикання з моделі %s", model)
-
-    if isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code == 429:
-        await set_global_quota_cooldown(3600)
 
     raise ValueError(
         f"Усі Gemini-моделі повернули помилку або невалідний JSON. "

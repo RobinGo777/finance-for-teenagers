@@ -17,13 +17,14 @@ MODERATOR_CHAT_ID    = int(os.getenv("MODERATOR_CHAT_ID", "0"))  # твій Tele
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Flash-моделі для текстових постів — пріоритет (перевірено на API-ключі).
+# 2.0-flash першим: стабільніший на free tier; 2.5 — резерв.
 _GEMINI_FLASH_ORDER = (
-    "gemini-2.5-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
     "gemini-2.0-flash",
     "gemini-2.0-flash-001",
+    "gemini-2.5-flash",
     "gemini-flash-latest",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
     "gemini-1.5-flash",
 )
 
@@ -83,7 +84,7 @@ _GEMINI_RAW = [
     model.strip().removeprefix("models/")
     for model in os.getenv(
         "GEMINI_MODELS",
-        "gemini-2.5-flash,gemini-2.0-flash",
+        "gemini-2.0-flash,gemini-2.5-flash",
     ).split(",")
     if model.strip()
 ]

@@ -302,6 +302,20 @@ async def cmd_test_all(message: Message) -> None:
     await _start_test_run(message, get_test_rubrics())
 
 
+@router.message(Command("gemini_reset"), F.chat.id == MODERATOR_CHAT_ID)
+async def cmd_gemini_reset(message: Message) -> None:
+    """/gemini_reset — знімає глобальну паузу Gemini після 429 / нового ключа."""
+    from generators.gemini import clear_global_quota_cooldown
+    from data.redis_client import delete
+
+    await clear_global_quota_cooldown()
+    await delete("video:gemini_cooldown")
+    await message.answer(
+        "✅ Паузу Gemini знято.\n"
+        "Можеш перевірити: /test cost_of_life"
+    )
+
+
 @router.message(Command("help"), F.chat.id == MODERATOR_CHAT_ID)
 async def cmd_help(message: Message) -> None:
     """/help — список команд."""
@@ -311,6 +325,7 @@ async def cmd_help(message: Message) -> None:
         "/status — стан бота\n"
         "/pause — пауза публікацій\n"
         "/resume — відновити публікації\n"
+        "/gemini_reset — зняти паузу Gemini (після нового ключа)\n"
         "/test crypto — тест однієї рубрики\n"
         "/test_all — тест усіх рубрик лише в особисті\n"
         "/help — ця довідка"

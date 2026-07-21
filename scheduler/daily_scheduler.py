@@ -71,7 +71,10 @@ def _is_rate_limit_error(error: BaseException) -> bool:
     return (
         isinstance(error, GeminiQuotaExhausted)
         or "429" in text
+        or "503" in text
         or "Too Many Requests" in text
+        or "Service Unavailable" in text
+        or "UNAVAILABLE" in text
         or "RESOURCE_EXHAUSTED" in text
     )
 
@@ -83,8 +86,8 @@ def _is_rate_limit_error(error: BaseException) -> bool:
 async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
     """Генерує і публікує один пост рубрики.
 
-    При 429 (RPM) відкладає повтор через GEMINI_SCHEDULE_RETRY_DELAY_SEC,
-    щоб не втрачати денний слот через короткочасний ліміт.
+    При 429/503 відкладає повтор через GEMINI_SCHEDULE_RETRY_DELAY_SEC,
+    щоб не втрачати денний слот через короткочасний збій API.
     """
 
     # Перевіряємо чи бот не на паузі
@@ -128,13 +131,14 @@ async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
         if _is_rate_limit_error(e) and attempt <= GEMINI_SCHEDULE_RETRIES:
             delay = GEMINI_SCHEDULE_RETRY_DELAY_SEC * attempt
             logger.warning(
-                "[scheduler] 429 на %s — повтор #%s через %s с",
+                "[scheduler] Тимчасовий збій Gemini на %s — повтор #%s через %s с",
                 rubric_key,
                 attempt,
                 delay,
             )
             await notify_moderator(
-                f"⏳ Gemini 429 на «{rubric_key}» — повтор через {delay // 60} хв "
+                f"⏳ Gemini тимчасово недоступна на «{rubric_key}» — "
+                f"повтор через {delay // 60} хв "
                 f"(спроба {attempt}/{GEMINI_SCHEDULE_RETRIES})."
             )
             await asyncio.sleep(delay)

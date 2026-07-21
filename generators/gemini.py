@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Кількість спроб для кожної моделі перед переходом до наступної.
 MODEL_RETRIES = 3
-JSON_MODEL_RETRIES = 1  # відео/JSON — один retry, щоб не палити квоту каскадом
+JSON_MODEL_RETRIES = 2  # 503/мережа — 2 спроби, без зайвого каскаду
 RETRY_BASE_DELAY = 4  # секунди (експоненційний backoff)
 
 _GEMINI_GLOBAL_COOLDOWN_KEY = "gemini:quota_cooldown"
@@ -200,6 +200,10 @@ async def _do_request(model: str, payload: dict) -> str:
         if response.status_code == 429:
             wait = _retry_after_seconds_from_response(response) or RETRY_BASE_DELAY
             _set_cooldown(min(wait, GEMINI_MAX_RETRY_WAIT_SEC))
+        elif response.status_code == 503:
+            # Перевантаження Google — коротка пауза перед наступною спробою.
+            wait = _retry_after_seconds_from_response(response) or 8.0
+            _set_cooldown(min(wait, 30.0))
         response.raise_for_status()
         data = response.json()
 

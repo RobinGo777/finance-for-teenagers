@@ -116,6 +116,10 @@ NEWSAPI_KEY          = os.getenv("NEWSAPI_KEY", "")
 PEXELS_API_KEY       = os.getenv("PEXELS_API_KEY", "")
 UNSPLASH_ACCESS_KEY  = os.getenv("UNSPLASH_ACCESS_KEY", "")
 STOCK_PHOTO_PROVIDER = os.getenv("STOCK_PHOTO_PROVIDER", "auto").lower()
+# Скільки кандидатів тягнемо зі стоку за один пошук (для скорингу).
+STOCK_PHOTO_CANDIDATES = int(os.getenv("STOCK_PHOTO_CANDIDATES", "8"))
+# Не повторювати те саме фото протягом N днів.
+STOCK_PHOTO_DEDUP_DAYS = int(os.getenv("STOCK_PHOTO_DEDUP_DAYS", "14"))
 
 # Безкоштовні — ключі не потрібні
 COINGECKO_URL        = "https://api.coingecko.com/api/v3"

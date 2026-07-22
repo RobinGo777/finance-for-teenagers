@@ -23,7 +23,7 @@ from bot.moderator import get_test_rubrics
 from config import SCHEDULE, VIDEO_SEARCH_QUERIES_PER_RUN, _normalize_gemini_models
 from data import redis_client
 from generators import gemini
-from images.generator import generate_post_image
+from images.generator import generate_post_image, _score_photo, _photo_queries
 from scheduler.daily_scheduler import GENERATORS
 from scheduler.monitor import _stable_id
 from utils.http_safe import redact_secrets, safe_error_text
@@ -54,6 +54,40 @@ class PublisherHelpersTests(unittest.TestCase):
         ]
         self.assertNotIn("#ТаємнийХештег", drawn_strings)
         self.assertFalse(any("Таємний Автор" in text for text in drawn_strings))
+
+    def test_photo_queries_prefer_english(self) -> None:
+        queries = _photo_queries(
+            title="Крипта і шахрайство для підлітків",
+            body="Як не втратити гроші",
+            rubric="crime",
+        )
+        joined = " ".join(queries).lower()
+        self.assertTrue(any("cryptocurrency" in q or "scam" in q or "cyber" in q for q in queries))
+        self.assertNotIn("крипта і шахрайство", joined)
+
+    def test_photo_score_penalizes_cliches(self) -> None:
+        good = {
+            "alt": "cybersecurity phishing warning on laptop screen",
+            "description": "",
+            "url": "https://example.com/a.jpg",
+            "width": 1800,
+            "height": 1200,
+            "likes": 80,
+            "query": "cybersecurity phishing warning laptop",
+        }
+        cliche = {
+            "alt": "businessman smiling handshake suit tie portrait",
+            "description": "stacks of cash dollar bills flying",
+            "url": "https://example.com/b.jpg",
+            "width": 800,
+            "height": 600,
+            "likes": 10,
+            "query": "cybersecurity phishing warning laptop",
+        }
+        self.assertGreater(
+            _score_photo(good, good["query"], ["phishing", "scam"]),
+            _score_photo(cliche, cliche["query"], ["phishing", "scam"]),
+        )
 
     def test_html_is_escaped_and_limited(self) -> None:
         raw = "<b>5 & 7</b>" + ("x" * CAPTION_LIMIT)

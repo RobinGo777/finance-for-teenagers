@@ -308,3 +308,30 @@ async def add_weekly_topic(topic: str) -> None:
 async def get_weekly_topics() -> list:
     """Повертає всі теми тижня."""
     return await lrange("weekly:posts")
+
+
+# ─────────────────────────────────────────
+# СТОКОВІ ФОТО (дедуплікація)
+# ─────────────────────────────────────────
+
+async def is_photo_used(photo_id: str) -> bool:
+    """Чи вже використовували це фото нещодавно."""
+    if not photo_id:
+        return False
+    return bool(await get(f"photos:used:{photo_id}"))
+
+
+async def mark_photo_used(photo_id: str, days: int = 14) -> None:
+    """Позначає фото як використане (TTL у днях)."""
+    if not photo_id:
+        return
+    await set_value(f"photos:used:{photo_id}", "1", ex=max(1, days) * 86400)
+
+
+async def filter_unused_photo_ids(photo_ids: list[str]) -> set[str]:
+    """Повертає підмножину id, які вже в дедуп-кеші."""
+    used: set[str] = set()
+    for photo_id in photo_ids:
+        if photo_id and await is_photo_used(photo_id):
+            used.add(photo_id)
+    return used

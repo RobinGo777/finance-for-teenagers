@@ -313,12 +313,14 @@ async def _publish_quiz(post_data: dict) -> int | None:
             parse_mode="HTML",
         )
 
-    # Потім опитування
+    # Потім опитування.
+    # У каналах Telegram дозволяє лише анонімні опитування.
+    # Голоси збираємо через stop_poll при публікації відповіді (~20 год).
     msg = await bot.send_poll(
         chat_id=TELEGRAM_CHANNEL_ID,
         question=question,
         options=options,
-        is_anonymous=False,
+        is_anonymous=True,
         allows_multiple_answers=False,
     )
 
@@ -359,12 +361,12 @@ async def _publish_with_poll(post_data: dict) -> int | None:
         photo = BufferedInputFile(image, filename="post.png")
         await _send_photo_with_text(TELEGRAM_CHANNEL_ID, photo, text)
 
-    # Опитування під постом
+    # Опитування під постом (у каналі — лише анонімне).
     msg = await bot.send_poll(
         chat_id=TELEGRAM_CHANNEL_ID,
         question=_clean_poll_question("Який факт — брехня шахрая?"),
         options=options,
-        is_anonymous=False,
+        is_anonymous=True,
     )
 
     return msg.message_id
@@ -373,8 +375,29 @@ async def _publish_with_poll(post_data: dict) -> int | None:
 async def publish_quiz_answer(poll_id: str, poll_results: dict) -> None:
     """Публікує 💡 відповідь на квіз через 24 год."""
     from generators.quiz import generate_quiz_answer
+    from data.redis_client import get_quiz_pending
 
-    lamp_post = await generate_quiz_answer(poll_id, poll_results)
+    # Анонімні опитування в каналі не дають poll_answer — беремо підсумки через stop_poll.
+    results = dict(poll_results or {})
+    pending = await get_quiz_pending(poll_id)
+    if pending and pending.get("message_id"):
+        try:
+            stopped = await bot.stop_poll(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                message_id=int(pending["message_id"]),
+            )
+            results = {
+                str(i): int(opt.voter_count)
+                for i, opt in enumerate(stopped.options)
+            }
+        except Exception as e:
+            logger.warning(
+                "[publisher] stop_poll для квізу %s не вдався: %s",
+                poll_id,
+                e,
+            )
+
+    lamp_post = await generate_quiz_answer(poll_id, results)
     if lamp_post:
         await bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,

@@ -24,10 +24,10 @@ _test_task: asyncio.Task | None = None
 
 @router.poll_answer()
 async def on_poll_answer(poll_answer: PollAnswer) -> None:
-    """Ловить голоси у квіз-опитуваннях, щоб потім показати «X% відповіли правильно».
+    """Ловить голоси у квіз-опитуваннях (для особистих/груп із неанонімним poll).
 
-    Зберігаємо лише голоси квізів (є pending-запис). Опитування неанонімні —
-    інакше Telegram не надсилає poll_answer з даними користувача.
+    У каналі опитування анонімні — туди poll_answer не приходить.
+    Статистику для каналу беремо через stop_poll при публікації відповіді.
     """
     poll_id = poll_answer.poll_id
     pending = await get_quiz_pending(poll_id)

@@ -2,7 +2,6 @@ import asyncio
 import io
 import logging
 import re
-import textwrap
 import httpx
 from PIL import Image, ImageDraw, ImageFont
 from config import (
@@ -44,6 +43,70 @@ def _strip_unrenderable(text: str) -> str:
     """Прибирає emoji/піктограми, які шрифт картинки не вміє малювати."""
     cleaned = _UNRENDERABLE.sub("", text or "")
     return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+TEXT_MARGIN = 48  # лівий і правий відступ тексту на картинці
+
+
+def _text_width(text: str, font: ImageFont.ImageFont) -> int:
+    """Ширина рядка в пікселях для конкретного шрифту."""
+    if hasattr(font, "getlength"):
+        try:
+            return int(font.getlength(text))
+        except Exception:
+            pass
+    bbox = font.getbbox(text or " ")
+    return int(bbox[2] - bbox[0])
+
+
+def _wrap_text_to_width(
+    text: str,
+    font: ImageFont.ImageFont,
+    max_width: int,
+) -> str:
+    """Переносить текст по піксельній ширині (не по кількості символів).
+
+    textwrap.fill по символах обрізає українські заголовки праворуч —
+    широкі літери не вміщаються в «width=28».
+    """
+    clean = _strip_unrenderable(text)
+    if not clean:
+        return ""
+
+    words = clean.split()
+    lines: list[str] = []
+    current = ""
+
+    def _flush() -> None:
+        nonlocal current
+        if current:
+            lines.append(current)
+            current = ""
+
+    for word in words:
+        candidate = f"{current} {word}".strip() if current else word
+        if _text_width(candidate, font) <= max_width:
+            current = candidate
+            continue
+
+        _flush()
+        # Дуже довге слово без пробілів — ріжемо по символах.
+        if _text_width(word, font) <= max_width:
+            current = word
+            continue
+
+        chunk = ""
+        for ch in word:
+            trial = chunk + ch
+            if chunk and _text_width(trial, font) > max_width:
+                lines.append(chunk)
+                chunk = ch
+            else:
+                chunk = trial
+        current = chunk
+
+    _flush()
+    return "\n".join(lines)
 
 
 def _hex_to_rgb(hex_color: str) -> tuple:
@@ -182,11 +245,12 @@ def _build_stock_photo(
             draw = ImageDraw.Draw(img)
 
             font_title = _load_font(FONT_PATH, 58)
+            max_title_w = IMG_WIDTH - TEXT_MARGIN * 2
 
             draw.rectangle([(0, 0), (8, IMG_HEIGHT)], fill=accent_color)
             draw.text(
-                (48, IMG_HEIGHT - 180),
-                textwrap.fill(_strip_unrenderable(title), width=34),
+                (TEXT_MARGIN, IMG_HEIGHT - 180),
+                _wrap_text_to_width(title, font_title, max_title_w),
                 font=font_title,
                 fill=white,
             )
@@ -244,16 +308,17 @@ def generate_post_image(
 
     # ── Заголовок (великий) ──
     font_title = _load_font(FONT_PATH, 64)
-    wrapped_title = textwrap.fill(_strip_unrenderable(title), width=28)
-    draw.text((48, 64), wrapped_title, font=font_title, fill=white)
+    max_text_w = IMG_WIDTH - TEXT_MARGIN * 2
+    wrapped_title = _wrap_text_to_width(title, font_title, max_text_w)
+    draw.text((TEXT_MARGIN, 64), wrapped_title, font=font_title, fill=white)
 
     # ── Підзаголовок / тіло ──
-    title_lines = wrapped_title.count("\n") + 1
+    title_lines = wrapped_title.count("\n") + 1 if wrapped_title else 1
     body_y = 64 + title_lines * 76 + 24
 
     font_body = _load_font(FONT_PATH_REGULAR, 36)
-    wrapped_body = textwrap.fill(_strip_unrenderable(body), width=52)
-    draw.text((48, body_y), wrapped_body, font=font_body, fill=muted)
+    wrapped_body = _wrap_text_to_width(body, font_body, max_text_w)
+    draw.text((TEXT_MARGIN, body_y), wrapped_body, font=font_body, fill=muted)
 
     # ── Нижня панель ──
     draw.rectangle(
@@ -316,8 +381,12 @@ def generate_chart_image(
     font_value = _load_font(FONT_PATH, 32)
 
     # ── Заголовок ──
-    draw.text((48, 40), _strip_unrenderable(title), font=font_title, fill=white)
-    draw.line([(48, 100), (IMG_WIDTH - 48, 100)], fill=accent_color, width=2)
+    max_text_w = IMG_WIDTH - TEXT_MARGIN * 2
+    wrapped_title = _wrap_text_to_width(title, font_title, max_text_w)
+    draw.text((TEXT_MARGIN, 40), wrapped_title, font=font_title, fill=white)
+    title_lines = wrapped_title.count("\n") + 1 if wrapped_title else 1
+    line_y = 40 + title_lines * 56 + 8
+    draw.line([(TEXT_MARGIN, line_y), (IMG_WIDTH - TEXT_MARGIN, line_y)], fill=accent_color, width=2)
 
     # ── Параметри графіку ──
     chart_x      = 80
@@ -405,8 +474,9 @@ def generate_quiz_image(question: str, template: dict) -> bytes:
 
     # Велике питання по центру
     font_q = _load_font(FONT_PATH, 54)
-    wrapped = textwrap.fill(_strip_unrenderable(question), width=32)
-    lines   = wrapped.split("\n")
+    max_q_w = IMG_WIDTH - TEXT_MARGIN * 2
+    wrapped = _wrap_text_to_width(question, font_q, max_q_w)
+    lines   = wrapped.split("\n") if wrapped else []
     total_h = len(lines) * 64
     start_y = (IMG_HEIGHT - total_h) // 2 - 20
 

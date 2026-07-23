@@ -11,6 +11,7 @@ from bot.publisher import (
     _prepare_html,
     _split_message,
     _split_caption,
+    _strip_hashtags,
     CAPTION_LIMIT,
 )
 from generators.video import (
@@ -97,6 +98,15 @@ class PublisherHelpersTests(unittest.TestCase):
         self.assertTrue(prepared.endswith("…"))
         self.assertNotIn("<b>", prepared)
         self.assertLessEqual(len(prepared), CAPTION_LIMIT)
+
+    def test_strip_hashtags_from_posts(self) -> None:
+        raw = "🧾 #СкількиКоштує\n\nЦіль: новий телефон\n#Фінанси"
+        cleaned = _strip_hashtags(raw)
+        self.assertNotIn("#", cleaned)
+        self.assertIn("🧾", cleaned)
+        self.assertIn("СкількиКоштує", cleaned)
+        self.assertIn("Ціль: новий телефон", cleaned)
+        self.assertIn("Фінанси", cleaned)
 
     def test_poll_values_follow_telegram_limits(self) -> None:
         question = _clean_poll_question("q" * 500)

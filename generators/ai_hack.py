@@ -5,7 +5,7 @@ from images.generator import generate_post_image_async
 
 RUBRIC_KEY     = "ai_hack"
 RUBRIC_NAME    = "#ШІ_Лайфхак"
-RUBRIC_HASHTAG = "🤖💡 #ШІ_Лайфхак"
+RUBRIC_HASHTAG = "🤖💡 ШІ_Лайфхак"
 
 AI_HACK_TOPICS = [
     "пояснити складну тему простими словами",

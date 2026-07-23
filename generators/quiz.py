@@ -4,7 +4,7 @@ from images.generator import generate_quiz_image_async
 
 RUBRIC_KEY     = "quiz"
 RUBRIC_NAME    = "#ФінКвіз"
-RUBRIC_HASHTAG = "🧠 #ФінКвіз"
+RUBRIC_HASHTAG = "🧠 ФінКвіз"
 
 QUIZ_TOPICS = [
     "бюджет і планування",
@@ -64,7 +64,7 @@ async def generate_quiz() -> dict:
   "question": "питання (макс 100 символів)",
   "options": ["варіант А", "варіант Б", "варіант В", "варіант Г"],
   "correct_index": 1,
-  "lamp_post": "💡 Відповідь на #ФінКвіз\\n\\nПравильна відповідь: [варіант] ✅\\n\\n[пояснення 2-3 речення]\\n\\n🤯 Wow-факт: [цікавий факт по темі]"
+  "lamp_post": "💡 Відповідь на ФінКвіз\\n\\nПравильна відповідь: [варіант] ✅\\n\\n[пояснення 2-3 речення]\\n\\n🤯 Wow-факт: [цікавий факт по темі]"
 }
 """
 

@@ -6,7 +6,7 @@ from images.generator import generate_post_image_async
 
 RUBRIC_KEY     = "ai_news"
 RUBRIC_NAME    = "#ТехНовини"
-RUBRIC_HASHTAG = "🚀 #ТехНовини"
+RUBRIC_HASHTAG = "🚀 ТехНовини"
 
 
 async def generate_ai_news(focus: str | None = None) -> dict:

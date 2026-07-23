@@ -1,9 +1,10 @@
-from aiogram import Bot
-from aiogram.types import BufferedInputFile
 import base64
 import html
 import logging
+import re
 import time
+from aiogram import Bot
+from aiogram.types import BufferedInputFile
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, MODERATOR_CHAT_ID
 from data.redis_client import (
     get_autopilot,
@@ -15,6 +16,9 @@ from data.redis_client import (
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+# Хештеги (#Слово) у публікаціях каналу не використовуємо.
+_HASHTAG_RE = re.compile(r"(?<!\w)#[\wА-Яа-яЁёІіЇїЄєҐґ]+", re.UNICODE)
 
 
 async def notify_moderator(text: str) -> None:
@@ -38,6 +42,17 @@ CAPTION_LIMIT   = 1024   # підпис до фото
 MESSAGE_LIMIT   = 4096   # звичайне повідомлення
 POLL_QUESTION_LIMIT = 300
 POLL_OPTION_LIMIT   = 100
+
+
+def _strip_hashtags(text: str) -> str:
+    """Прибирає #хештеги з тексту поста, зберігаючи emoji і зміст."""
+    cleaned = _HASHTAG_RE.sub("", text or "")
+    lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in cleaned.split("\n")]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 def _prepare_html(text: str, limit: int) -> str:
@@ -127,7 +142,7 @@ async def _send_photo_with_text(chat_id, photo, text: str) -> int:
 def _test_preview_text(post_data: dict) -> str:
     """Формує повний текст тестового прев'ю для звичайного поста або квізу."""
     if post_data.get("rubric") != "quiz":
-        text = post_data.get("post", "") or "(генератор не повернув текст поста)"
+        text = _strip_hashtags(post_data.get("post", "") or "(генератор не повернув текст поста)")
         poll_options = _clean_poll_options(post_data.get("poll_options", []))
         if poll_options:
             text += "\n\nТестове опитування:\n" + "\n".join(
@@ -147,7 +162,7 @@ def _test_preview_text(post_data: dict) -> str:
         f"Питання: {post_data.get('question', '')}\n\n"
         + "\n".join(f"{index + 1}. {option}" for index, option in enumerate(options))
         + f"\n\n✅ Правильна відповідь: {answer}\n\n"
-        + post_data.get("lamp_post", "")
+        + _strip_hashtags(post_data.get("lamp_post", ""))
     ).strip()
 
 
@@ -166,7 +181,7 @@ def _moderation_body(post_data: dict) -> str:
         lines += ["", f"✅ Правильна: {answer}"]
         return "\n".join(lines).strip()
 
-    text = post_data.get("post", "") or "(генератор не повернув текст поста)"
+    text = _strip_hashtags(post_data.get("post", "") or "(генератор не повернув текст поста)")
     poll_options = _clean_poll_options(post_data.get("poll_options", []))
     if poll_options:
         text += "\n\nОпитування:\n" + "\n".join(
@@ -262,7 +277,7 @@ async def publish_to_channel(post_data: dict) -> int | None:
     Повертає message_id опублікованого поста.
     """
     rubric   = post_data.get("rubric", "")
-    text     = post_data.get("post", "")
+    text     = _strip_hashtags(post_data.get("post", ""))
     image    = post_data.get("image")          # bytes (Pillow)
     image_url = post_data.get("image_url")     # str (YouTube thumbnail)
 
@@ -309,7 +324,7 @@ async def _publish_quiz(post_data: dict) -> int | None:
         await bot.send_photo(
             chat_id=TELEGRAM_CHANNEL_ID,
             photo=photo,
-            caption=_prepare_html(f"🧠 #ФінКвіз\n\n{post_data.get('question', '')}", CAPTION_LIMIT),
+            caption=_prepare_html(f"🧠 ФінКвіз\n\n{post_data.get('question', '')}", CAPTION_LIMIT),
             parse_mode="HTML",
         )
 
@@ -401,7 +416,7 @@ async def publish_quiz_answer(poll_id: str, poll_results: dict) -> None:
     if lamp_post:
         await bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,
-            text=_prepare_html(lamp_post, MESSAGE_LIMIT),
+            text=_prepare_html(_strip_hashtags(lamp_post), MESSAGE_LIMIT),
             parse_mode="HTML",
         )
         await clear_quiz_pending(poll_id)

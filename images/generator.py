@@ -502,11 +502,11 @@ def _compose_stock_image(img: Image.Image, title: str, template: dict) -> bytes:
     composed = Image.alpha_composite(base, overlay).convert("RGB")
     draw = ImageDraw.Draw(composed)
 
-    font_title = _load_font(FONT_PATH, 58)
+    font_title = _load_font(FONT_PATH, 68)
     max_title_w = IMG_WIDTH - TEXT_MARGIN * 2
     wrapped = _wrap_text_to_width(title, font_title, max_title_w)
     lines = wrapped.count("\n") + 1 if wrapped else 1
-    title_h = lines * 68
+    title_h = lines * 78
     title_y = max(TEXT_MARGIN, IMG_HEIGHT - 48 - title_h)
 
     draw.rectangle([(0, 0), (8, IMG_HEIGHT)], fill=accent_color)
@@ -640,14 +640,14 @@ def generate_post_image_result(
     )
 
     # ── Заголовок (великий) ──
-    font_title = _load_font(FONT_PATH, 64)
+    font_title = _load_font(FONT_PATH, 74)
     max_text_w = IMG_WIDTH - TEXT_MARGIN * 2
     wrapped_title = _wrap_text_to_width(title, font_title, max_text_w)
     draw.text((TEXT_MARGIN, 64), wrapped_title, font=font_title, fill=white)
 
     # ── Підзаголовок / тіло ──
     title_lines = wrapped_title.count("\n") + 1 if wrapped_title else 1
-    body_y = 64 + title_lines * 76 + 24
+    body_y = 64 + title_lines * 86 + 24
 
     font_body = _load_font(FONT_PATH_REGULAR, 36)
     wrapped_body = _wrap_text_to_width(body, font_body, max_text_w)
@@ -709,7 +709,7 @@ def generate_chart_image(
     img  = Image.new("RGB", (IMG_WIDTH, IMG_HEIGHT), bg_color)
     draw = ImageDraw.Draw(img)
 
-    font_title = _load_font(FONT_PATH, 48)
+    font_title = _load_font(FONT_PATH, 56)
     font_label = _load_font(FONT_PATH_REGULAR, 28)
     font_value = _load_font(FONT_PATH, 32)
 
@@ -718,7 +718,7 @@ def generate_chart_image(
     wrapped_title = _wrap_text_to_width(title, font_title, max_text_w)
     draw.text((TEXT_MARGIN, 40), wrapped_title, font=font_title, fill=white)
     title_lines = wrapped_title.count("\n") + 1 if wrapped_title else 1
-    line_y = 40 + title_lines * 56 + 8
+    line_y = 40 + title_lines * 64 + 8
     draw.line([(TEXT_MARGIN, line_y), (IMG_WIDTH - TEXT_MARGIN, line_y)], fill=accent_color, width=2)
 
     # ── Параметри графіку ──
@@ -806,7 +806,7 @@ def generate_quiz_image(question: str, template: dict) -> bytes:
     draw.rectangle([(IMG_WIDTH - 8, 0), (IMG_WIDTH, size)], fill=accent_color)
 
     # Велике питання по центру
-    font_q = _load_font(FONT_PATH, 54)
+    font_q = _load_font(FONT_PATH, 62)
     max_q_w = IMG_WIDTH - TEXT_MARGIN * 2
     wrapped = _wrap_text_to_width(question, font_q, max_q_w)
     lines   = wrapped.split("\n") if wrapped else []

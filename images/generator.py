@@ -200,6 +200,11 @@ _RUBRIC_EN_QUERIES: dict[str, list[str]] = {
         "finance quiz education chalkboard",
         "teen learning money concepts",
     ],
+    "banknotes": [
+        "new banknote currency design close up",
+        "commemorative banknote paper money",
+        "central bank currency issuance",
+    ],
 }
 
 # Простий UA→EN словник для ключових слів із заголовка.
@@ -261,6 +266,7 @@ def _rubric_key(rubric: str) -> str:
         "професіїмайбутнього": "careers",
         "стартаптижня": "startup_week",
         "фінквіз": "quiz",
+        "новабанкнота": "banknotes",
     }
     if raw in _RUBRIC_EN_QUERIES:
         return raw

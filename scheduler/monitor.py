@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta
 import pytz
 
 from config import (
+    BANKNOTE_MAX_PER_CYCLE,
+    BANKNOTE_POLL_DAYS,
     MONITOR_HOURS,
     MONITOR_MAX_PER_DAY,
     TIMEZONE,
@@ -12,13 +14,15 @@ from config import (
 from data.redis_client import (
     get as redis_get,
     get_monitor_count_today,
+    increment_banknote_count,
     increment_monitor_count,
     is_published,
+    mark_banknote_seen,
     mark_published,
 )
 from data.fetchers import fetch_all_rss, fetch_news, fetch_github_trending
-from generators.video import generate_video
 from generators.ai_news import generate_ai_news
+from generators.banknotes import generate_banknotes
 from bot.publisher import publish, notify_moderator
 from utils.http_safe import safe_error_text
 
@@ -143,7 +147,7 @@ async def run_monitor_cycle() -> None:
     # Перевірки — ПОСЛІДОВНО, а не gather.
     # Інакше три корутини одночасно проходять перевірку ліміту й можуть
     # опублікувати більше, ніж MONITOR_MAX_PER_DAY (гонка).
-    for check in (_check_video, _check_breaking_news, _check_github_trending):
+    for check in (_check_breaking_news, _check_github_trending):
         if await get_monitor_count_today() >= MONITOR_MAX_PER_DAY:
             break
         try:
@@ -159,19 +163,6 @@ async def run_monitor_cycle() -> None:
 # ─────────────────────────────────────────
 # ПЕРЕВІРКИ
 # ─────────────────────────────────────────
-
-async def _check_video() -> None:
-    """Шукає нове топове відео на YouTube."""
-    try:
-        post_data = await generate_video()
-        if post_data:
-            count = await get_monitor_count_today()
-            if count < MONITOR_MAX_PER_DAY:
-                await publish(post_data)
-                await increment_monitor_count()
-                logger.info("[monitor] Відео опубліковано: %s", post_data.get("topic"))
-    except Exception as e:
-        logger.exception("[monitor] Помилка відео: %s", safe_error_text(e))
 
 
 async def _check_breaking_news() -> None:
@@ -248,3 +239,61 @@ async def _check_github_trending() -> None:
 
     except Exception as e:
         logger.exception("[monitor] Помилка GitHub trending: %s", safe_error_text(e))
+
+
+async def _publish_banknote_alerts() -> int:
+    """Шле всі нові банкноти, що пройшли фільтр (до BANKNOTE_MAX_PER_CYCLE).
+
+    Не чіпає MONITOR_MAX_PER_DAY — алерти колекціонера йдуть окремо.
+    """
+    sent = 0
+    max_per_cycle = max(1, BANKNOTE_MAX_PER_CYCLE)
+
+    while sent < max_per_cycle:
+        post_data = await generate_banknotes()
+        if not post_data:
+            break
+
+        await publish(post_data)
+        dedupe_ids = list(post_data.get("dedupe_ids") or [])
+        item_id = post_data.get("item_id")
+        if item_id and item_id not in dedupe_ids:
+            dedupe_ids.insert(0, item_id)
+        if dedupe_ids:
+            await mark_published(*dedupe_ids)
+            await mark_banknote_seen(*dedupe_ids)
+        await increment_banknote_count()
+        sent += 1
+        logger.info("[banknotes] Алерт: %s", post_data.get("topic"))
+
+    return sent
+
+
+async def start_banknote_monitor() -> None:
+    """Рідкісний цикл: раз на кілька днів, щоб не пропустити нові/ювілейні випуски.
+
+    Оперативність не потрібна — тиждень затримки ок; важливіше не спалити Gemini.
+    """
+    days = max(1, BANKNOTE_POLL_DAYS)
+    interval = days * 86400
+    logger.info(
+        "[banknotes] Моніторинг кожні %s дн. (до %s алертів/цикл, lookback у конфігу)",
+        days,
+        max(1, BANKNOTE_MAX_PER_CYCLE),
+    )
+
+    while True:
+        try:
+            paused = await redis_get("settings:paused")
+            if not paused:
+                sent = await _publish_banknote_alerts()
+                if sent:
+                    logger.info("[banknotes] Надіслано алертів за цикл: %s", sent)
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.info("[banknotes] Моніторинг зупинено")
+            break
+        except Exception as e:
+            logger.exception("[banknotes] Помилка циклу: %s", safe_error_text(e))
+            await notify_moderator(f"⚠️ Збій моніторингу банкнот: {safe_error_text(e)}")
+            await asyncio.sleep(60)

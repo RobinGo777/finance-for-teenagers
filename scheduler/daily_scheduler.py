@@ -12,6 +12,7 @@ from config import (
     SCHEDULE_RANDOM_OFFSET_MAX,
     CYBER_SCHEDULE_TIME,
     QUIZ_ANSWER_CRON_TIME,
+    VIDEO_SCHEDULE_TIME,
     TIMEZONE,
     QUIZ_ANSWER_DELAY_HOURS,
     GEMINI_SCHEDULE_RETRIES,
@@ -38,6 +39,7 @@ from generators.subscription_trap import generate_subscription_trap
 from generators.money_myth import generate_money_myth
 from generators.behavioral_finance import generate_behavioral_finance
 from generators.startup_week import generate_startup_week
+from generators.banknotes import generate_banknotes
 
 KYIV = pytz.timezone(TIMEZONE)
 logger = logging.getLogger(__name__)
@@ -59,6 +61,8 @@ GENERATORS = {
     "money_myth":    generate_money_myth,
     "behavioral_finance": generate_behavioral_finance,
     "startup_week":   generate_startup_week,
+    # Подієва рубрика (також у моніторі) — для /test banknotes.
+    "banknotes":      generate_banknotes,
 }
 
 def _parse_hhmm(value: str) -> tuple[int, int]:
@@ -248,6 +252,16 @@ def setup_scheduler() -> AsyncIOScheduler:
         check_and_publish_quiz_answers,
         CronTrigger(hour=quiz_hour, minute=quiz_minute, timezone=KYIV),
         id="quiz_answers",
+        replace_existing=True,
+    )
+
+    # ── ВІДЕО — 1 раз на день (черга / сканування Gemini) ──
+    video_hour, video_minute = _parse_hhmm(VIDEO_SCHEDULE_TIME)
+    scheduler.add_job(
+        publish_rubric,
+        CronTrigger(hour=video_hour, minute=video_minute, timezone=KYIV),
+        args=["video"],
+        id="video_daily",
         replace_existing=True,
     )
 

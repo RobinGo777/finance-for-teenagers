@@ -237,14 +237,49 @@ async def increment_monitor_count() -> None:
     await expire(key, 172800)  # 2 доби — щоб ключ сам прибрався
 
 
+def _banknote_count_key() -> str:
+    """Окремий денний ліміт для #НоваБанкнота (Київ)."""
+    today = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d")
+    return f"banknotes:count:{today}"
+
+
+async def get_banknote_count_today() -> int:
+    value = await get(_banknote_count_key())
+    return int(value) if value else 0
+
+
+async def increment_banknote_count() -> None:
+    key = _banknote_count_key()
+    await incr(key)
+    await expire(key, 172800)
+
+
+async def is_banknote_seen(fingerprint: str) -> bool:
+    """Чи вже відправляли цю банкноту (за відбитком)."""
+    if not fingerprint:
+        return False
+    return await sismember("banknotes:seen", fingerprint)
+
+
+async def mark_banknote_seen(*fingerprints: str) -> None:
+    """Позначає відбитки банкноти як уже надіслані."""
+    values = [fp for fp in fingerprints if fp]
+    if not values:
+        return
+    await sadd("banknotes:seen", *values)
+
+
 async def is_published(item_id: str) -> bool:
     """Перевіряє чи вже публікували цей пост/відео."""
     return await sismember("monitor:published_ids", item_id)
 
 
-async def mark_published(item_id: str) -> None:
-    """Позначає пост як опублікований."""
-    await sadd("monitor:published_ids", item_id)
+async def mark_published(*item_ids: str) -> None:
+    """Позначає пост(и) як опубліковані."""
+    values = [item_id for item_id in item_ids if item_id]
+    if not values:
+        return
+    await sadd("monitor:published_ids", *values)
 
 
 async def save_quiz_pending(poll_id: str, data: dict) -> None:

@@ -138,6 +138,40 @@ RSS_FEEDS = [
 ]
 
 # ─────────────────────────────────────────
+# БАНКНОТИ — лише свіжі / ювілейні випуски
+# ─────────────────────────────────────────
+# Немає окремого API «нових банкнот» — збираємо NewsAPI + Google News RSS,
+# жорстко фільтруємо аукціони/каталоги, постимо подієво (монітор).
+BANKNOTE_NEWS_QUERY = (
+    '("new banknote" OR "commemorative banknote" OR "anniversary banknote" '
+    'OR "jubilee banknote" OR "new series" banknotes OR "issues new" banknote '
+    'OR "unveils" banknote OR "put into circulation" banknote)'
+)
+BANKNOTE_RSS_FEEDS = [
+    (
+        "https://news.google.com/rss/search?"
+        "q=%22new+banknote%22+OR+%22commemorative+banknote%22+"
+        "OR+%22anniversary+banknote%22+OR+%22new+series%22+banknotes"
+        "&hl=en-US&gl=US&ceid=US:en"
+    ),
+    (
+        "https://news.google.com/rss/search?"
+        "q=%D0%BD%D0%BE%D0%B2%D0%B0+%D0%B1%D0%B0%D0%BD%D0%BA%D0%BD%D0%BE%D1%82%D0%B0+"
+        "OR+%D1%8E%D0%B2%D1%96%D0%BB%D0%B5%D0%B9%D0%BD%D0%B0+%D0%B1%D0%B0%D0%BD%D0%BA%D0%BD%D0%BE%D1%82%D0%B0"
+        "&hl=uk&gl=UA&ceid=UA:uk"
+    ),
+]
+BANKNOTE_LOOKBACK_DAYS = int(os.getenv("BANKNOTE_LOOKBACK_DAYS", "10"))
+BANKNOTE_MIN_SCORE = int(os.getenv("BANKNOTE_MIN_SCORE", "10"))
+BANKNOTE_MAX_CANDIDATES = int(os.getenv("BANKNOTE_MAX_CANDIDATES", "8"))
+# 0 = без денного ліміту: кожна нова банкнота = окремий алерт.
+BANKNOTE_MAX_PER_DAY = int(os.getenv("BANKNOTE_MAX_PER_DAY", "0"))
+# Як часто опитувати новини про банкноти (хвилини).
+BANKNOTE_POLL_MINUTES = int(os.getenv("BANKNOTE_POLL_MINUTES", "20"))
+# Скільки різних банкнот можна надіслати за один цикл опитування.
+BANKNOTE_MAX_PER_CYCLE = int(os.getenv("BANKNOTE_MAX_PER_CYCLE", "3"))
+
+# ─────────────────────────────────────────
 # 4 ПЕРСОНИ-АВТОРИ
 # ─────────────────────────────────────────
 PERSONAS = [
@@ -274,9 +308,11 @@ VIDEO_SEARCH_CACHE_TTL_SEC = 10800    # 3 години (як інтервал м
 
 # Економія Gemini: не питати модель про слабкі/вже відхилені набори.
 VIDEO_MIN_RANK_SCORE = 1              # мін. локальний score топ-кандидата перед Gemini
-VIDEO_MIN_CANDIDATES = 2              # не питати Gemini, якщо лише 1 слабкий кандидат
-VIDEO_GEMINI_COOLDOWN_HOURS = 8       # макс. 1 спроба Gemini для відео за цей період
-VIDEO_REJECT_TTL_SEC = 18 * 3600      # негативний кеш відхилених video_id (18 год)
+VIDEO_MIN_CANDIDATES = 1              # достатньо 1 сильного кандидата
+# Після УСПІШНОЇ публікації / вичерпаної квоти — пауза, щоб не спамити.
+# Відхилення кандидатів більше НЕ ставить цю паузу (раніше через це зникали алерти).
+VIDEO_GEMINI_COOLDOWN_HOURS = 4
+VIDEO_REJECT_TTL_SEC = 12 * 3600      # негативний кеш відхилених video_id (12 год)
 
 # Приймаємо лише відео цими мовами аудіо (порожня = невідомо, теж пропускаємо).
 # Мета — не постити ролики, які підліток не зрозуміє (напр. гінді на NDTV India).

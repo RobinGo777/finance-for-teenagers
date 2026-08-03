@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta
 import pytz
 
 from config import (
+    BANKNOTE_MAX_PER_CYCLE,
+    BANKNOTE_POLL_MINUTES,
     MONITOR_HOURS,
     MONITOR_MAX_PER_DAY,
     TIMEZONE,
@@ -12,13 +14,16 @@ from config import (
 from data.redis_client import (
     get as redis_get,
     get_monitor_count_today,
+    increment_banknote_count,
     increment_monitor_count,
     is_published,
+    mark_banknote_seen,
     mark_published,
 )
 from data.fetchers import fetch_all_rss, fetch_news, fetch_github_trending
 from generators.video import generate_video
 from generators.ai_news import generate_ai_news
+from generators.banknotes import generate_banknotes
 from bot.publisher import publish, notify_moderator
 from utils.http_safe import safe_error_text
 
@@ -248,3 +253,58 @@ async def _check_github_trending() -> None:
 
     except Exception as e:
         logger.exception("[monitor] Помилка GitHub trending: %s", safe_error_text(e))
+
+
+async def _publish_banknote_alerts() -> int:
+    """Шле всі нові банкноти, що пройшли фільтр (до BANKNOTE_MAX_PER_CYCLE).
+
+    Не чіпає MONITOR_MAX_PER_DAY — алерти колекціонера йдуть окремо.
+    """
+    sent = 0
+    max_per_cycle = max(1, BANKNOTE_MAX_PER_CYCLE)
+
+    while sent < max_per_cycle:
+        post_data = await generate_banknotes()
+        if not post_data:
+            break
+
+        await publish(post_data)
+        dedupe_ids = list(post_data.get("dedupe_ids") or [])
+        item_id = post_data.get("item_id")
+        if item_id and item_id not in dedupe_ids:
+            dedupe_ids.insert(0, item_id)
+        if dedupe_ids:
+            await mark_published(*dedupe_ids)
+            await mark_banknote_seen(*dedupe_ids)
+        await increment_banknote_count()
+        sent += 1
+        logger.info("[banknotes] Алерт: %s", post_data.get("topic"))
+
+    return sent
+
+
+async def start_banknote_monitor() -> None:
+    """Окремий частіший цикл: нова банкнота → алерт одразу (не чекає слотів 11/14/17/20)."""
+    interval = max(5, BANKNOTE_POLL_MINUTES) * 60
+    logger.info(
+        "[banknotes] Моніторинг кожні %s хв (до %s алертів/цикл)",
+        max(5, BANKNOTE_POLL_MINUTES),
+        max(1, BANKNOTE_MAX_PER_CYCLE),
+    )
+
+    # Перша перевірка одразу після старту бота.
+    while True:
+        try:
+            paused = await redis_get("settings:paused")
+            if not paused:
+                sent = await _publish_banknote_alerts()
+                if sent:
+                    logger.info("[banknotes] Надіслано алертів за цикл: %s", sent)
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.info("[banknotes] Моніторинг зупинено")
+            break
+        except Exception as e:
+            logger.exception("[banknotes] Помилка циклу: %s", safe_error_text(e))
+            await notify_moderator(f"⚠️ Збій моніторингу банкнот: {safe_error_text(e)}")
+            await asyncio.sleep(60)

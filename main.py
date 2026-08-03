@@ -10,7 +10,7 @@ from config import TELEGRAM_BOT_TOKEN, GEMINI_MODELS
 from bot.moderator import router as moderator_router
 from bot.publisher import bot
 from scheduler.daily_scheduler import setup_scheduler
-from scheduler.monitor import start_monitor
+from scheduler.monitor import start_monitor, start_banknote_monitor
 
 # ─────────────────────────────────────────
 # ЛОГУВАННЯ
@@ -102,7 +102,9 @@ async def main() -> None:
 
     # Monitor (реалтайм) — запускаємо як окрему задачу
     monitor_task = asyncio.create_task(start_monitor())
+    banknote_task = asyncio.create_task(start_banknote_monitor())
     logger.info("📡 Реалтайм моніторинг запущено")
+    logger.info("💵 Моніторинг нових банкнот запущено")
 
     # Keep-alive HTTP server для Render Web Service
     keepalive_task = asyncio.create_task(start_keepalive_server())
@@ -118,9 +120,12 @@ async def main() -> None:
 
         scheduler.shutdown()
         monitor_task.cancel()
+        banknote_task.cancel()
         keepalive_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await keepalive_task
+            await monitor_task
+            await banknote_task
         await bot.session.close()
         await close_gemini()
         await close_fetchers()

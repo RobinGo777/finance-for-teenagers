@@ -468,11 +468,20 @@ async def send_to_moderator(post_data: dict) -> None:
         f"{body[:800]}{'...' if len(body) > 800 else ''}"
     )
 
+    image = post_data.get("image")
+    image_url = post_data.get("image_url")
     if image:
         photo = BufferedInputFile(image, filename="preview.png")
         await bot.send_photo(
             chat_id=MODERATOR_CHAT_ID,
             photo=photo,
+            caption=caption,
+            reply_markup=keyboard,
+        )
+    elif image_url:
+        await bot.send_photo(
+            chat_id=MODERATOR_CHAT_ID,
+            photo=image_url,
             caption=caption,
             reply_markup=keyboard,
         )

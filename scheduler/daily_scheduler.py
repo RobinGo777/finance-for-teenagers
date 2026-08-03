@@ -38,6 +38,7 @@ from generators.subscription_trap import generate_subscription_trap
 from generators.money_myth import generate_money_myth
 from generators.behavioral_finance import generate_behavioral_finance
 from generators.startup_week import generate_startup_week
+from generators.banknotes import generate_banknotes
 
 KYIV = pytz.timezone(TIMEZONE)
 logger = logging.getLogger(__name__)
@@ -59,6 +60,8 @@ GENERATORS = {
     "money_myth":    generate_money_myth,
     "behavioral_finance": generate_behavioral_finance,
     "startup_week":   generate_startup_week,
+    # Подієва рубрика (також у моніторі) — для /test banknotes.
+    "banknotes":      generate_banknotes,
 }
 
 def _parse_hhmm(value: str) -> tuple[int, int]:

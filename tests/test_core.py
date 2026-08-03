@@ -453,5 +453,89 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertNotIn("fa170a69secret", safe_error_text(Exception(news)))
 
 
+class BanknoteFilterTests(unittest.TestCase):
+    def test_accepts_new_and_commemorative_issues(self) -> None:
+        from data.banknotes import score_banknote_item
+
+        self.assertGreater(
+            score_banknote_item(
+                "Central Bank unveils new 50 euro commemorative banknote"
+            ),
+            0,
+        )
+        self.assertGreater(
+            score_banknote_item(
+                "НБУ презентував ювілейну банкноту до річниці Незалежності"
+            ),
+            0,
+        )
+
+    def test_rejects_auctions_and_price_noise(self) -> None:
+        from data.banknotes import score_banknote_item
+
+        self.assertEqual(
+            score_banknote_item("Rare 1918 banknote sold for $40,000 at auction"),
+            0,
+        )
+        self.assertEqual(
+            score_banknote_item("How much is this old banknote worth? Price guide"),
+            0,
+        )
+        self.assertEqual(
+            score_banknote_item("Bitcoin hits new high amid crypto rally"),
+            0,
+        )
+
+    def test_filter_dedupes_and_ranks(self) -> None:
+        from data.banknotes import filter_banknote_candidates
+
+        items = [
+            {
+                "title": "Bank of X unveils new 20 polymer banknote series",
+                "summary": "New series enters circulation next month",
+                "url": "https://example.com/a?utm=1",
+                "published": "2026-08-01T12:00:00Z",
+            },
+            {
+                "title": "Bank of X unveils new 20 polymer banknote series",
+                "summary": "New series enters circulation next month",
+                "url": "https://www.example.com/a",
+                "published": "2026-08-01T13:00:00Z",
+            },
+            {
+                "title": "Collectors auction rare banknote for record price",
+                "url": "https://example.com/spam",
+            },
+        ]
+        filtered = filter_banknote_candidates(items, lookback_days=30)
+        self.assertEqual(len(filtered), 1)
+        self.assertIn("polymer", filtered[0]["title"].lower())
+
+    def test_banknotes_in_generators(self) -> None:
+        self.assertIn("banknotes", GENERATORS)
+
+    def test_same_banknote_different_headlines_match(self) -> None:
+        from data.banknotes import issue_fingerprint, titles_too_similar
+
+        self.assertTrue(
+            titles_too_similar(
+                "ECB unveils new 20 euro commemorative banknote",
+                "European Central Bank issues commemorative 20 euro banknote",
+            )
+        )
+        a = issue_fingerprint("euro area", "20 EUR", "ювілейна")
+        b = issue_fingerprint("Euro Area", "20 eur", "commemorative")
+        self.assertEqual(a, b)
+        self.assertTrue(a.startswith("bn:issue:"))
+
+    def test_title_fingerprint_stable_across_wording(self) -> None:
+        from data.banknotes import title_fingerprint
+
+        # Різний порядок слів, ті самі ключові токени → той самий відбиток.
+        a = title_fingerprint("Poland 500 zloty commemorative banknote unveiled")
+        b = title_fingerprint("Commemorative 500 zloty banknote Poland unveiled")
+        self.assertEqual(a, b)
+
+
 if __name__ == "__main__":
     unittest.main()

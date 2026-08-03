@@ -165,15 +165,16 @@ BANKNOTE_RSS_FEEDS = [
         "&hl=uk&gl=UA&ceid=UA:uk"
     ),
 ]
-BANKNOTE_LOOKBACK_DAYS = int(os.getenv("BANKNOTE_LOOKBACK_DAYS", "10"))
+BANKNOTE_LOOKBACK_DAYS = int(os.getenv("BANKNOTE_LOOKBACK_DAYS", "21"))
 BANKNOTE_MIN_SCORE = int(os.getenv("BANKNOTE_MIN_SCORE", "10"))
 BANKNOTE_MAX_CANDIDATES = int(os.getenv("BANKNOTE_MAX_CANDIDATES", "8"))
 # 0 = без денного ліміту алертів (дедуп усе одно блокує повтори).
 BANKNOTE_MAX_PER_DAY = int(os.getenv("BANKNOTE_MAX_PER_DAY", "0"))
-# Рідше на free tier — кожен алерт їсть Gemini з опційного бюджету.
-BANKNOTE_POLL_MINUTES = int(os.getenv("BANKNOTE_POLL_MINUTES", "90"))
-BANKNOTE_MAX_PER_CYCLE = int(os.getenv("BANKNOTE_MAX_PER_CYCLE", "1"))
-# Google Search у Gemini на free tier дорогий — за замовчуванням вимкнено.
+# Не треба оперативність: раз на N днів достатньо, аби не пропустити випуски.
+BANKNOTE_POLL_DAYS = int(os.getenv("BANKNOTE_POLL_DAYS", "7"))
+# Застарілий інтервал у хвилинах (якщо BANKNOTE_POLL_DAYS не задано через старий .env).
+BANKNOTE_POLL_MINUTES = int(os.getenv("BANKNOTE_POLL_MINUTES", str(7 * 24 * 60)))
+BANKNOTE_MAX_PER_CYCLE = int(os.getenv("BANKNOTE_MAX_PER_CYCLE", "3"))
 BANKNOTE_USE_SEARCH = os.getenv("BANKNOTE_USE_SEARCH", "0").strip().lower() in {
     "1", "true", "yes", "on",
 }
@@ -314,13 +315,16 @@ VIDEO_SEARCH_QUERIES_PER_RUN = 3
 VIDEO_SEARCH_CACHE_TTL_SEC = 10800    # 3 години (як інтервал монітора)
 
 # Економія Gemini на free tier:
-# - відео/банкноти ділять GEMINI_OPTIONAL_MAX_PER_DAY;
-# - після КОЖНОЇ спроби Gemini для відео — cooldown, щоб не спалити RPD
-#   і лишити квоту на звичайні пости з розкладу.
+# - 1 сканування YouTube+Gemini на день; зайві «норм» відео — у чергу на наступні дні;
+# - відео/банкноти ділять GEMINI_OPTIONAL_MAX_PER_DAY.
 VIDEO_MIN_RANK_SCORE = 1
 VIDEO_MIN_CANDIDATES = 1
 VIDEO_GEMINI_COOLDOWN_HOURS = int(os.getenv("VIDEO_GEMINI_COOLDOWN_HOURS", "8"))
 VIDEO_REJECT_TTL_SEC = 12 * 3600
+# Скільки «зайвих» відео тримати в черзі на наступні дні.
+VIDEO_QUEUE_MAX = int(os.getenv("VIDEO_QUEUE_MAX", "5"))
+# Щоденний слот #ВідеоТижня (Київ) — не в реалтайм-моніторі.
+VIDEO_SCHEDULE_TIME = os.getenv("VIDEO_SCHEDULE_TIME", "18:27")
 
 # Приймаємо лише відео цими мовами аудіо (порожня = невідомо, теж пропускаємо).
 # Мета — не постити ролики, які підліток не зрозуміє (напр. гінді на NDTV India).

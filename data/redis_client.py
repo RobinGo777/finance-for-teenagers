@@ -104,9 +104,24 @@ async def lpush(key: str, value: str) -> int:
     return result.get("result", 0)
 
 
+async def rpush(key: str, value: str) -> int:
+    result = await _request(["RPUSH", key, value])
+    return result.get("result", 0)
+
+
 async def rpop(key: str) -> str | None:
     result = await _request(["RPOP", key])
     return result.get("result")
+
+
+async def lpop(key: str) -> str | None:
+    result = await _request(["LPOP", key])
+    return result.get("result")
+
+
+async def llen(key: str) -> int:
+    result = await _request(["LLEN", key])
+    return int(result.get("result") or 0)
 
 
 async def lrange(key: str, start: int = 0, end: int = -1) -> list:
@@ -282,6 +297,44 @@ async def can_use_optional_gemini(max_per_day: int) -> bool:
 async def clear_optional_gemini_budget() -> None:
     """Скидає денний лічильник опційних викликів (для /gemini_reset)."""
     await delete(_optional_gemini_key())
+
+
+# ─────────────────────────────────────────
+# ВІДЕО: черга на наступні дні
+# ─────────────────────────────────────────
+
+_VIDEO_QUEUE_KEY = "video:publish_queue"
+_VIDEO_SCAN_KEY = "video:last_scan_date"
+
+
+async def video_queue_len() -> int:
+    return await llen(_VIDEO_QUEUE_KEY)
+
+
+async def video_queue_push(items: list[dict]) -> None:
+    """Додає відео в кінець черги (FIFO)."""
+    for item in items:
+        await rpush(_VIDEO_QUEUE_KEY, json.dumps(item, ensure_ascii=False))
+
+
+async def video_queue_pop() -> dict | None:
+    """Бере найстаріше відео з черги."""
+    raw = await lpop(_VIDEO_QUEUE_KEY)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+async def get_video_last_scan_date() -> str | None:
+    return await get(_VIDEO_SCAN_KEY)
+
+
+async def set_video_last_scan_date(day: str) -> None:
+    """day = YYYY-MM-DD (Київ). TTL 3 доби — ключ сам прибереться."""
+    await set_value(_VIDEO_SCAN_KEY, day, ex=3 * 86400)
 
 
 async def is_banknote_seen(fingerprint: str) -> bool:

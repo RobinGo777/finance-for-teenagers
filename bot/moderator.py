@@ -78,7 +78,12 @@ async def _run_test_rubrics(rubrics: list[str]) -> None:
                 text=f"⏳ Тест {index}/{len(rubrics)}: {rubric}",
             )
             try:
-                post_data = await GENERATORS[rubric]()
+                if rubric == "video":
+                    from generators.video import generate_video
+
+                    post_data = await generate_video(force=True)
+                else:
+                    post_data = await GENERATORS[rubric]()
                 if not post_data:
                     skipped.append(rubric)
                     await bot.send_message(
@@ -310,9 +315,10 @@ async def cmd_gemini_reset(message: Message) -> None:
 
     await clear_global_quota_cooldown()
     await delete("video:gemini_cooldown")
+    await delete("video:last_scan_date")
     await clear_optional_gemini_budget()
     await message.answer(
-        "✅ Паузу Gemini знято (глобальна + відео + опційний денний лічильник).\n"
+        "✅ Паузу Gemini знято (глобальна + відео + сканування + опційний лічильник).\n"
         "Можеш перевірити: /test cost_of_life"
     )
 

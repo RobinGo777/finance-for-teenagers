@@ -12,6 +12,7 @@ from config import (
     SCHEDULE_RANDOM_OFFSET_MAX,
     CYBER_SCHEDULE_TIME,
     QUIZ_ANSWER_CRON_TIME,
+    VIDEO_SCHEDULE_TIME,
     TIMEZONE,
     QUIZ_ANSWER_DELAY_HOURS,
     GEMINI_SCHEDULE_RETRIES,
@@ -251,6 +252,16 @@ def setup_scheduler() -> AsyncIOScheduler:
         check_and_publish_quiz_answers,
         CronTrigger(hour=quiz_hour, minute=quiz_minute, timezone=KYIV),
         id="quiz_answers",
+        replace_existing=True,
+    )
+
+    # ── ВІДЕО — 1 раз на день (черга / сканування Gemini) ──
+    video_hour, video_minute = _parse_hhmm(VIDEO_SCHEDULE_TIME)
+    scheduler.add_job(
+        publish_rubric,
+        CronTrigger(hour=video_hour, minute=video_minute, timezone=KYIV),
+        args=["video"],
+        id="video_daily",
         replace_existing=True,
     )
 

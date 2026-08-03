@@ -6,7 +6,7 @@ import pytz
 
 from config import (
     BANKNOTE_MAX_PER_CYCLE,
-    BANKNOTE_POLL_MINUTES,
+    BANKNOTE_POLL_DAYS,
     MONITOR_HOURS,
     MONITOR_MAX_PER_DAY,
     TIMEZONE,
@@ -21,7 +21,6 @@ from data.redis_client import (
     mark_published,
 )
 from data.fetchers import fetch_all_rss, fetch_news, fetch_github_trending
-from generators.video import generate_video
 from generators.ai_news import generate_ai_news
 from generators.banknotes import generate_banknotes
 from bot.publisher import publish, notify_moderator
@@ -148,7 +147,7 @@ async def run_monitor_cycle() -> None:
     # Перевірки — ПОСЛІДОВНО, а не gather.
     # Інакше три корутини одночасно проходять перевірку ліміту й можуть
     # опублікувати більше, ніж MONITOR_MAX_PER_DAY (гонка).
-    for check in (_check_video, _check_breaking_news, _check_github_trending):
+    for check in (_check_breaking_news, _check_github_trending):
         if await get_monitor_count_today() >= MONITOR_MAX_PER_DAY:
             break
         try:
@@ -164,19 +163,6 @@ async def run_monitor_cycle() -> None:
 # ─────────────────────────────────────────
 # ПЕРЕВІРКИ
 # ─────────────────────────────────────────
-
-async def _check_video() -> None:
-    """Шукає нове топове відео на YouTube."""
-    try:
-        post_data = await generate_video()
-        if post_data:
-            count = await get_monitor_count_today()
-            if count < MONITOR_MAX_PER_DAY:
-                await publish(post_data)
-                await increment_monitor_count()
-                logger.info("[monitor] Відео опубліковано: %s", post_data.get("topic"))
-    except Exception as e:
-        logger.exception("[monitor] Помилка відео: %s", safe_error_text(e))
 
 
 async def _check_breaking_news() -> None:
@@ -284,15 +270,18 @@ async def _publish_banknote_alerts() -> int:
 
 
 async def start_banknote_monitor() -> None:
-    """Окремий частіший цикл: нова банкнота → алерт одразу (не чекає слотів 11/14/17/20)."""
-    interval = max(5, BANKNOTE_POLL_MINUTES) * 60
+    """Рідкісний цикл: раз на кілька днів, щоб не пропустити нові/ювілейні випуски.
+
+    Оперативність не потрібна — тиждень затримки ок; важливіше не спалити Gemini.
+    """
+    days = max(1, BANKNOTE_POLL_DAYS)
+    interval = days * 86400
     logger.info(
-        "[banknotes] Моніторинг кожні %s хв (до %s алертів/цикл)",
-        max(5, BANKNOTE_POLL_MINUTES),
+        "[banknotes] Моніторинг кожні %s дн. (до %s алертів/цикл, lookback у конфігу)",
+        days,
         max(1, BANKNOTE_MAX_PER_CYCLE),
     )
 
-    # Перша перевірка одразу після старту бота.
     while True:
         try:
             paused = await redis_get("settings:paused")

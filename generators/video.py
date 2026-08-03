@@ -14,6 +14,11 @@ from data.redis_client import (
     set_value as redis_set,
     can_use_optional_gemini,
     record_optional_gemini_use,
+    video_queue_len,
+    video_queue_push,
+    video_queue_pop,
+    get_video_last_scan_date,
+    set_video_last_scan_date,
 )
 from data.fetchers import fetch_youtube_videos, fetch_news, YouTubeQuotaExceeded
 from config import (
@@ -33,7 +38,9 @@ from config import (
     VIDEO_MIN_CANDIDATES,
     VIDEO_GEMINI_COOLDOWN_HOURS,
     VIDEO_REJECT_TTL_SEC,
+    VIDEO_QUEUE_MAX,
     GEMINI_OPTIONAL_MAX_PER_DAY,
+    TIMEZONE,
 )
 from utils.http_safe import safe_error_text
 
@@ -306,21 +313,97 @@ def _video_rank(video: dict, recent_news_titles: list[str]) -> tuple[int, int]:
     return score, int(video.get("views", 0))
 
 
-async def generate_video() -> dict | None:
-    """
-    Знаходить свіже топове відео на YouTube і генерує коментар.
-    Повертає None якщо нічого цікавого не знайдено.
+def _today_kyiv() -> str:
+    import pytz
+    from datetime import datetime
 
-    Gemini викликається лише якщо є достатньо сильні кандидати,
-    немає cooldown і id ще не в негативному кеші відхилень.
-    """
+    return datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d")
 
-    if await _is_gemini_cooling_down():
+
+def _pack_queued_item(video: dict, topic: str, post: str) -> dict:
+    return {
+        "video_id": video["video_id"],
+        "topic": topic,
+        "post": post,
+        "thumbnail": video.get("thumbnail", ""),
+        "title": video.get("title", ""),
+        "channel": video.get("channel", ""),
+    }
+
+
+def _post_from_queued(item: dict, persona_name: str, template_name: str) -> dict:
+    video_id = item["video_id"]
+    post = item.get("post") or ""
+    link = f"https://youtu.be/{video_id}"
+    if link not in post:
+        post = post.rstrip() + f"\n{link}"
+    return {
+        "rubric": RUBRIC_KEY,
+        "topic": item.get("topic") or item.get("title") or "відео",
+        "post": post,
+        "image_url": item.get("thumbnail") or "",
+        "video_id": video_id,
+        "persona": persona_name,
+        "template": template_name,
+    }
+
+
+async def _publish_from_queue(persona: dict, template: dict | None) -> dict | None:
+    """Бере наступне відео з черги без Gemini (текст уже готовий)."""
+    while True:
+        item = await video_queue_pop()
+        if not item:
+            return None
+        video_id = item.get("video_id") or ""
+        if not video_id or await is_published(video_id):
+            logger.info("[video] Черга: пропуск вже опублікованого/порожнього %s", video_id)
+            continue
+        await save_topic(RUBRIC_KEY, item.get("topic") or video_id)
+        await mark_published(video_id)
+        remaining = await video_queue_len()
         logger.info(
-            "[video] Gemini cooldown активний (%s год) — пропуск",
-            VIDEO_GEMINI_COOLDOWN_HOURS,
+            "[video] З черги: %s (залишилось у черзі: %s)",
+            item.get("topic") or video_id,
+            remaining,
         )
-        return None
+        return _post_from_queued(
+            item,
+            persona["name"],
+            template["name"] if template else "Organic Growth",
+        )
+
+
+async def generate_video(*, force: bool = False) -> dict | None:
+    """
+    Раз на день шукає нормальні відео (1× Gemini).
+    1 гідне → публікуємо сьогодні.
+    Кілька → одне сьогодні, решту в чергу на наступні дні (без Gemini).
+    """
+
+    persona = pick_persona()
+    template = next((t for t in VISUAL_TEMPLATES if t["name"] == "Organic Growth"), None)
+    today = _today_kyiv()
+
+    # 1) Спочатку черга — без Gemini.
+    queued = await video_queue_len()
+    if queued > 0:
+        post = await _publish_from_queue(persona, template)
+        if post:
+            return post
+
+    # 2) Вже сканували сьогодні — не палимо квоту знову.
+    if not force:
+        last_scan = await get_video_last_scan_date()
+        if last_scan == today:
+            logger.info("[video] Сьогодні вже сканували YouTube/Gemini — чекаємо завтра")
+            return None
+
+        if await _is_gemini_cooling_down():
+            logger.info(
+                "[video] Gemini cooldown активний (%s год) — пропуск",
+                VIDEO_GEMINI_COOLDOWN_HOURS,
+            )
+            return None
 
     if await is_quota_paused():
         logger.info("[video] Глобальна пауза Gemini — пропуск")
@@ -333,11 +416,7 @@ async def generate_video() -> dict | None:
         )
         return None
 
-    persona     = pick_persona()
     used_topics = await get_used_topics(RUBRIC_KEY)
-
-    # Organic Growth шаблон для відео
-    template = next((t for t in VISUAL_TEMPLATES if t["name"] == "Organic Growth"), None)
 
     recent_news = await fetch_news(
         query=(
@@ -349,8 +428,6 @@ async def generate_video() -> dict | None:
     )
     recent_news_titles = [item.get("title", "") for item in recent_news if item.get("title")]
 
-    # Один запит із широким вікном замість повторення всіх пошуків для кожного
-    # fallback-рівня. Це економить до 2/3 добової квоти YouTube Search API.
     candidates = await _collect_videos(
         min_views=VIDEO_MIN_VIEWS_FLOOR,
         hours=VIDEO_PUBLISHED_AFTER_HOURS * 2,
@@ -358,6 +435,7 @@ async def generate_video() -> dict | None:
     new_videos = await _filter_fresh(candidates)
 
     if not new_videos:
+        await set_video_last_scan_date(today)
         logger.info("[video] Не знайдено якісних свіжих відео")
         return None
     logger.info(
@@ -374,6 +452,7 @@ async def generate_video() -> dict | None:
     )
     best_score = _video_rank(ranked[0], recent_news_titles)[0]
     if best_score < VIDEO_MIN_RANK_SCORE:
+        await set_video_last_scan_date(today)
         logger.info(
             "[video] Найкращий score=%s < %s — Gemini не викликаємо",
             best_score,
@@ -386,16 +465,16 @@ async def generate_video() -> dict | None:
         if _video_rank(v, recent_news_titles)[0] >= VIDEO_MIN_RANK_SCORE
     ][:7]
     if len(top_videos) < VIDEO_MIN_CANDIDATES:
+        await set_video_last_scan_date(today)
         logger.info(
             "[video] Лише %s кандидат(ів) (мін. %s) — Gemini не викликаємо",
             len(top_videos),
             VIDEO_MIN_CANDIDATES,
         )
         return None
-    if not top_videos:
-        return None
 
     candidate_ids = [v["video_id"] for v in top_videos]
+    by_id = {v["video_id"]: v for v in top_videos}
 
     videos_str = "\n".join(
         (
@@ -408,21 +487,14 @@ async def generate_video() -> dict | None:
 
     task = (
         "Це рубрика «вау-відео для підлітка», а не телевізійні новини. "
-        "Вибери ОДНЕ найцікавіше відео для аудиторії 12-20 років: про ШІ, "
-        "гаджети, стартапи, науку, інженерію, роботів, космос, фінтех, "
-        "особисті фінанси або цифрову економіку. Віддавай перевагу короткому "
-        "демо, експерименту, тесту, огляду чи простому поясненню, яке "
-        "15-річний глядач захотів би додивитися до кінця. Обирай те, що "
-        "реально ПОКАЗУЄ предмет або процес, а не балакучий сюжет диктора, "
-        "політичну заяву чи кадр зі статичною фотографією. Оцінюй лише за "
-        "наданими назвою, каналом та описом — не вигадуй побачених кадрів. "
-        "ВАЖЛИВО: якщо жодне відео не є справді цікавим і вартим публікації "
-        "(нудне, чужомовне, лише новинний переказ без реальних кадрів) — "
-        "поверни video_id: \"\" (порожній рядок), і ми нічого не опублікуємо. "
-        "Краще пропустити тиждень, ніж показати слабке відео. "
-        "Якщо відео гарне — напиши захопливий коментар українською: що воно "
-        "демонструє або пояснює і чому це варте уваги. Додай доречний "
-        "фінансовий, технологічний або науковий факт."
+        "Обери ВСІ справді варті відео зі списку (від найкращого до слабшого), "
+        "але максимум "
+        f"{1 + VIDEO_QUEUE_MAX}. "
+        "Критерії: аудиторія 12-20, ШІ/гаджети/стартапи/наука/роботи/космос/"
+        "фінтех/ігри; коротке демо, експеримент, тест чи пояснення; реально "
+        "ПОКАЗУЄ процес, не балаканина диктора. Оцінюй лише за назвою/каналом/"
+        "описом. Якщо жодного гідного — picks: []. "
+        "Для КОЖНОГО обраного напиши topic і готовий український post."
     )
 
     base = build_base_prompt(
@@ -437,9 +509,13 @@ async def generate_video() -> dict | None:
     prompt = base + """
 ФОРМАТ ВІДПОВІДІ (тільки JSON):
 {
-  "video_id": "YouTube ID обраного відео",
-  "topic": "тема відео (3-5 слів)",
-  "post": "🎥 ВідеоТижня\\n\\n[emoji] [що відбувається — 1-2 захопливі речення]\\n\\n[чому це важливо або вражає — 1-2 речення]\\n\\n💰 Цікавий факт: [фінансовий або науковий кут]\\n\\n💬 [питання читачам]\\n\\n👇 Дивись відео:"
+  "picks": [
+    {
+      "video_id": "YouTube ID",
+      "topic": "тема відео (3-5 слів)",
+      "post": "🎥 ВідеоТижня\\n\\n[emoji] [що відбувається — 1-2 захопливі речення]\\n\\n[чому це важливо — 1-2 речення]\\n\\n💰 Цікавий факт: [...]\\n\\n💬 [питання]\\n\\n👇 Дивись відео:"
+    }
+  ]
 }
 """
 
@@ -457,45 +533,89 @@ async def generate_video() -> dict | None:
         await record_optional_gemini_use()
         await _mark_gemini_attempted()
         await _mark_rejected(candidate_ids)
+        await set_video_last_scan_date(today)
         logger.warning(
             "[video] Gemini недоступний — пропускаємо публікацію: %s",
             safe_error_text(exc),
         )
         return None
 
-    # Будь-яка відповідь Gemini = витрачена квота free tier.
     await record_optional_gemini_use()
     await _mark_gemini_attempted()
+    await set_video_last_scan_date(today)
 
-    video_id = (data.get("video_id") or "").strip()
+    raw_picks = data.get("picks") or []
+    if not isinstance(raw_picks, list):
+        raw_picks = []
 
-    # LLM свідомо відмовився — жодне відео не варте публікації.
-    if not video_id:
+    # Сумісність зі старим форматом {video_id, topic, post}.
+    if not raw_picks and data.get("video_id"):
+        raw_picks = [data]
+
+    valid: list[tuple[dict, dict]] = []
+    seen_ids: set[str] = set()
+    for pick in raw_picks:
+        if not isinstance(pick, dict):
+            continue
+        vid = (pick.get("video_id") or "").strip()
+        if not vid or vid in seen_ids or vid not in by_id:
+            continue
+        if await is_published(vid):
+            continue
+        post_text = (pick.get("post") or "").strip()
+        if not post_text:
+            continue
+        seen_ids.add(vid)
+        valid.append((by_id[vid], pick))
+        if len(valid) >= 1 + VIDEO_QUEUE_MAX:
+            break
+
+    if not valid:
         logger.info(
-            "[video] Модель відхилила всіх кандидатів — негативний кеш на %s с",
+            "[video] Модель не обрала гідних — негативний кеш на %s с",
             VIDEO_REJECT_TTL_SEC,
         )
         await _mark_rejected(candidate_ids)
         return None
 
-    # Перевіряємо що відео є в нашому списку; якщо ні — не вигадуємо, пропускаємо.
-    selected = next((v for v in top_videos if v["video_id"] == video_id), None)
-    if selected is None:
-        logger.info("[video] Обраний video_id не зі списку — негативний кеш кандидатів")
-        await _mark_rejected(candidate_ids)
-        return None
+    # Відхилені кандидати, яких не взяли — щоб не крутити знову.
+    chosen_ids = {v["video_id"] for v, _ in valid}
+    rejected = [vid for vid in candidate_ids if vid not in chosen_ids]
+    if rejected:
+        await _mark_rejected(rejected)
 
-    post_with_link = data["post"] + f"\nhttps://youtu.be/{selected['video_id']}"
+    first_video, first_pick = valid[0]
+    extras = valid[1:]
+    if extras:
+        await video_queue_push([
+            _pack_queued_item(
+                video,
+                (pick.get("topic") or video.get("title") or "")[:80],
+                pick.get("post") or "",
+            )
+            for video, pick in extras
+        ])
+        logger.info(
+            "[video] У чергу на наступні дні: %s",
+            len(extras),
+        )
 
-    await save_topic(RUBRIC_KEY, data["topic"])
-    await mark_published(selected["video_id"])
+    topic = (first_pick.get("topic") or first_video.get("title") or "")[:80]
+    post_with_link = (first_pick.get("post") or "").rstrip()
+    link = f"https://youtu.be/{first_video['video_id']}"
+    if link not in post_with_link:
+        post_with_link += f"\n{link}"
+
+    await save_topic(RUBRIC_KEY, topic)
+    await mark_published(first_video["video_id"])
 
     return {
         "rubric": RUBRIC_KEY,
-        "topic": data["topic"],
+        "topic": topic,
         "post": post_with_link,
-        "image_url": selected["thumbnail"],  # YouTube thumbnail
-        "video_id": selected["video_id"],
+        "image_url": first_video.get("thumbnail", ""),
+        "video_id": first_video["video_id"],
         "persona": persona["name"],
         "template": template["name"] if template else "Organic Growth",
+        "queued_extra": len(extras),
     }

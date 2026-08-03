@@ -12,6 +12,8 @@ from data.redis_client import (
     mark_published,
     get as redis_get,
     set_value as redis_set,
+    can_use_optional_gemini,
+    record_optional_gemini_use,
 )
 from data.fetchers import fetch_youtube_videos, fetch_news, YouTubeQuotaExceeded
 from config import (
@@ -31,6 +33,7 @@ from config import (
     VIDEO_MIN_CANDIDATES,
     VIDEO_GEMINI_COOLDOWN_HOURS,
     VIDEO_REJECT_TTL_SEC,
+    GEMINI_OPTIONAL_MAX_PER_DAY,
 )
 from utils.http_safe import safe_error_text
 
@@ -323,6 +326,13 @@ async def generate_video() -> dict | None:
         logger.info("[video] Глобальна пауза Gemini — пропуск")
         return None
 
+    if not await can_use_optional_gemini(GEMINI_OPTIONAL_MAX_PER_DAY):
+        logger.info(
+            "[video] Опційний бюджет Gemini вичерпано (%s/день) — лишаємо квоту на розклад",
+            GEMINI_OPTIONAL_MAX_PER_DAY,
+        )
+        return None
+
     persona     = pick_persona()
     used_topics = await get_used_topics(RUBRIC_KEY)
 
@@ -436,7 +446,7 @@ async def generate_video() -> dict | None:
     try:
         data = await generate_json(prompt)
     except GeminiQuotaExhausted as exc:
-        # Денна/глобальна квота — має сенс довга пауза саме для відео.
+        await record_optional_gemini_use()
         await _mark_gemini_attempted()
         logger.warning(
             "[video] Gemini квота вичерпана — пропуск: %s",
@@ -444,7 +454,8 @@ async def generate_video() -> dict | None:
         )
         return None
     except ValueError as exc:
-        # Помилка JSON/моделі: кешуємо кандидатів, але НЕ блокуємо всі слоти на години.
+        await record_optional_gemini_use()
+        await _mark_gemini_attempted()
         await _mark_rejected(candidate_ids)
         logger.warning(
             "[video] Gemini недоступний — пропускаємо публікацію: %s",
@@ -452,10 +463,13 @@ async def generate_video() -> dict | None:
         )
         return None
 
+    # Будь-яка відповідь Gemini = витрачена квота free tier.
+    await record_optional_gemini_use()
+    await _mark_gemini_attempted()
+
     video_id = (data.get("video_id") or "").strip()
 
     # LLM свідомо відмовився — жодне відео не варте публікації.
-    # Не ставимо VIDEO_GEMINI_COOLDOWN: наступний слот може мати інші кандидати.
     if not video_id:
         logger.info(
             "[video] Модель відхилила всіх кандидатів — негативний кеш на %s с",
@@ -475,8 +489,6 @@ async def generate_video() -> dict | None:
 
     await save_topic(RUBRIC_KEY, data["topic"])
     await mark_published(selected["video_id"])
-    # Пауза лише після реального вибору — щоб не слати кілька відео підряд.
-    await _mark_gemini_attempted()
 
     return {
         "rubric": RUBRIC_KEY,

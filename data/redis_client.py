@@ -254,6 +254,36 @@ async def increment_banknote_count() -> None:
     await expire(key, 172800)
 
 
+def _optional_gemini_key() -> str:
+    """Денний лічильник опційних Gemini-викликів (відео/банкноти), Київ."""
+    today = datetime.now(pytz.timezone(TIMEZONE)).strftime("%Y-%m-%d")
+    return f"gemini:optional_count:{today}"
+
+
+async def get_optional_gemini_used() -> int:
+    value = await get(_optional_gemini_key())
+    return int(value) if value else 0
+
+
+async def record_optional_gemini_use() -> None:
+    """+1 до опційного бюджету після реального виклику Gemini."""
+    key = _optional_gemini_key()
+    await incr(key)
+    await expire(key, 172800)
+
+
+async def can_use_optional_gemini(max_per_day: int) -> bool:
+    """Чи можна витратити ще один Gemini-запит на відео/банкноти."""
+    if max_per_day <= 0:
+        return True
+    return await get_optional_gemini_used() < max_per_day
+
+
+async def clear_optional_gemini_budget() -> None:
+    """Скидає денний лічильник опційних викликів (для /gemini_reset)."""
+    await delete(_optional_gemini_key())
+
+
 async def is_banknote_seen(fingerprint: str) -> bool:
     """Чи вже відправляли цю банкноту (за відбитком)."""
     if not fingerprint:

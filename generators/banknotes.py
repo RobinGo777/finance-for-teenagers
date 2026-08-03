@@ -13,17 +13,25 @@ from data.banknotes import (
     titles_too_similar,
 )
 from data.redis_client import (
+    can_use_optional_gemini,
     get_banknote_count_today,
     get_used_topics,
     is_banknote_seen,
     is_published,
     mark_banknote_seen,
     mark_published,
+    record_optional_gemini_use,
     save_topic,
 )
-from generators.gemini import generate_json
+from generators.gemini import generate_json, is_quota_paused, GeminiQuotaExhausted
 from images.generator import generate_post_image_async
-from config import BANKNOTE_MAX_PER_DAY, VISUAL_TEMPLATES
+from config import (
+    BANKNOTE_MAX_PER_DAY,
+    BANKNOTE_USE_SEARCH,
+    GEMINI_OPTIONAL_MAX_PER_DAY,
+    VISUAL_TEMPLATES,
+)
+from utils.http_safe import safe_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +114,17 @@ async def generate_banknotes() -> dict | None:
             logger.info("[banknotes] денний ліміт %s досягнуто", BANKNOTE_MAX_PER_DAY)
             return None
 
+    if await is_quota_paused():
+        logger.info("[banknotes] Глобальна пауза Gemini — пропуск")
+        return None
+
+    if not await can_use_optional_gemini(GEMINI_OPTIONAL_MAX_PER_DAY):
+        logger.info(
+            "[banknotes] Опційний бюджет Gemini вичерпано (%s/день) — лишаємо квоту на розклад",
+            GEMINI_OPTIONAL_MAX_PER_DAY,
+        )
+        return None
+
     item = await _pick_fresh_item()
     if not item:
         logger.info("[banknotes] немає свіжих кандидатів")
@@ -119,10 +138,16 @@ async def generate_banknotes() -> dict | None:
         f"Дата: {item.get('published') or '—'}"
     )
 
+    search_hint = (
+        "Можеш уточнити факти через пошук, але не вигадуй номінал, країну чи дату."
+        if BANKNOTE_USE_SEARCH
+        else "Не вигадуй фактів: пиши лише те, що є в даних нижче."
+    )
+
     prompt = f"""Ти пишеш коротке повідомлення українською для колекціонера банкнот (боністика).
 
 Завдання: описати ЛИШЕ цей свіжий або ювілейний випуск банкноти за даними нижче.
-Якщо в джерелі бракує фактів — можна уточнити через пошук, але не вигадуй номінал, країну чи дату.
+{search_hint}
 
 ДАНІ:
 {source_block}
@@ -147,7 +172,18 @@ async def generate_banknotes() -> dict | None:
 }}
 """
 
-    data = await generate_json(prompt, use_search=True)
+    try:
+        data = await generate_json(prompt, use_search=BANKNOTE_USE_SEARCH)
+    except GeminiQuotaExhausted as exc:
+        await record_optional_gemini_use()
+        logger.warning("[banknotes] Gemini квота: %s", safe_error_text(exc))
+        return None
+    except Exception as exc:
+        await record_optional_gemini_use()
+        logger.warning("[banknotes] Gemini помилка: %s", safe_error_text(exc))
+        return None
+
+    await record_optional_gemini_use()
     dedupe_ids = _collect_ids(item, data)
 
     if data.get("skip"):

@@ -306,12 +306,13 @@ async def cmd_test_all(message: Message) -> None:
 async def cmd_gemini_reset(message: Message) -> None:
     """/gemini_reset — знімає глобальну паузу Gemini після 429 / нового ключа."""
     from generators.gemini import clear_global_quota_cooldown
-    from data.redis_client import delete
+    from data.redis_client import clear_optional_gemini_budget, delete
 
     await clear_global_quota_cooldown()
     await delete("video:gemini_cooldown")
+    await clear_optional_gemini_budget()
     await message.answer(
-        "✅ Паузу Gemini знято.\n"
+        "✅ Паузу Gemini знято (глобальна + відео + опційний денний лічильник).\n"
         "Можеш перевірити: /test cost_of_life"
     )
 

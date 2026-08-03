@@ -101,6 +101,10 @@ GEMINI_SCHEDULE_RETRIES = int(os.getenv("GEMINI_SCHEDULE_RETRIES", "2"))
 GEMINI_SCHEDULE_RETRY_DELAY_SEC = int(os.getenv("GEMINI_SCHEDULE_RETRY_DELAY_SEC", "180"))
 # Глобальна пауза Gemini після вичерпання квоти (сек) — Redis, переживає рестарт.
 GEMINI_GLOBAL_COOLDOWN_SEC = int(os.getenv("GEMINI_GLOBAL_COOLDOWN_SEC", "14400"))
+# Денний ліміт «опційних» Gemini-викликів (відео + банкноти).
+# Розклад рубрик його НЕ чіпає — щоб free tier вистачало на звичайні пости.
+# 0 = без ліміту (платний ключ).
+GEMINI_OPTIONAL_MAX_PER_DAY = int(os.getenv("GEMINI_OPTIONAL_MAX_PER_DAY", "2"))
 
 # ─────────────────────────────────────────
 # UPSTASH REDIS
@@ -164,12 +168,15 @@ BANKNOTE_RSS_FEEDS = [
 BANKNOTE_LOOKBACK_DAYS = int(os.getenv("BANKNOTE_LOOKBACK_DAYS", "10"))
 BANKNOTE_MIN_SCORE = int(os.getenv("BANKNOTE_MIN_SCORE", "10"))
 BANKNOTE_MAX_CANDIDATES = int(os.getenv("BANKNOTE_MAX_CANDIDATES", "8"))
-# 0 = без денного ліміту: кожна нова банкнота = окремий алерт.
+# 0 = без денного ліміту алертів (дедуп усе одно блокує повтори).
 BANKNOTE_MAX_PER_DAY = int(os.getenv("BANKNOTE_MAX_PER_DAY", "0"))
-# Як часто опитувати новини про банкноти (хвилини).
-BANKNOTE_POLL_MINUTES = int(os.getenv("BANKNOTE_POLL_MINUTES", "20"))
-# Скільки різних банкнот можна надіслати за один цикл опитування.
-BANKNOTE_MAX_PER_CYCLE = int(os.getenv("BANKNOTE_MAX_PER_CYCLE", "3"))
+# Рідше на free tier — кожен алерт їсть Gemini з опційного бюджету.
+BANKNOTE_POLL_MINUTES = int(os.getenv("BANKNOTE_POLL_MINUTES", "90"))
+BANKNOTE_MAX_PER_CYCLE = int(os.getenv("BANKNOTE_MAX_PER_CYCLE", "1"))
+# Google Search у Gemini на free tier дорогий — за замовчуванням вимкнено.
+BANKNOTE_USE_SEARCH = os.getenv("BANKNOTE_USE_SEARCH", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 
 # ─────────────────────────────────────────
 # 4 ПЕРСОНИ-АВТОРИ
@@ -306,13 +313,14 @@ VIDEO_SEARCH_QUERIES_PER_RUN = 3
 # Кеш результатів пошуку в Redis — щоб повторні цикли не палили квоту.
 VIDEO_SEARCH_CACHE_TTL_SEC = 10800    # 3 години (як інтервал монітора)
 
-# Економія Gemini: не питати модель про слабкі/вже відхилені набори.
-VIDEO_MIN_RANK_SCORE = 1              # мін. локальний score топ-кандидата перед Gemini
-VIDEO_MIN_CANDIDATES = 1              # достатньо 1 сильного кандидата
-# Після УСПІШНОЇ публікації / вичерпаної квоти — пауза, щоб не спамити.
-# Відхилення кандидатів більше НЕ ставить цю паузу (раніше через це зникали алерти).
-VIDEO_GEMINI_COOLDOWN_HOURS = 4
-VIDEO_REJECT_TTL_SEC = 12 * 3600      # негативний кеш відхилених video_id (12 год)
+# Економія Gemini на free tier:
+# - відео/банкноти ділять GEMINI_OPTIONAL_MAX_PER_DAY;
+# - після КОЖНОЇ спроби Gemini для відео — cooldown, щоб не спалити RPD
+#   і лишити квоту на звичайні пости з розкладу.
+VIDEO_MIN_RANK_SCORE = 1
+VIDEO_MIN_CANDIDATES = 1
+VIDEO_GEMINI_COOLDOWN_HOURS = int(os.getenv("VIDEO_GEMINI_COOLDOWN_HOURS", "8"))
+VIDEO_REJECT_TTL_SEC = 12 * 3600
 
 # Приймаємо лише відео цими мовами аудіо (порожня = невідомо, теж пропускаємо).
 # Мета — не постити ролики, які підліток не зрозуміє (напр. гінді на NDTV India).

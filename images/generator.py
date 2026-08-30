@@ -844,6 +844,188 @@ def generate_quiz_image(question: str, template: dict) -> bytes:
     return _save_image(img)
 
 
+def generate_brain_image(
+    body: str,
+    template: dict,
+    prompt: str = "",
+    percent: int | None = None,
+    rubric: str = "ТренажерМозку",
+) -> bytes:
+    """Картка у стилі «Клуб 1%»: бейдж %, велика зона задачі, коротке питання.
+
+    `body` — сама головоломка (піраміда, літери, ребус). Рядки через \\n.
+    `prompt` — коротке питання під задачею («Що далі?»).
+    `percent` — скільки людей (орієнтир) розв'язують такий рівень.
+    """
+    bg_color = _hex_to_rgb(template["bg"])
+    accent_color = _hex_to_rgb(template["accent"])
+    white = (255, 255, 255)
+    muted = tuple(max(0, c - 40) for c in white)
+
+    img = Image.new("RGB", (IMG_WIDTH, IMG_HEIGHT), bg_color)
+    draw = ImageDraw.Draw(img)
+
+    size = 60
+    draw.rectangle([(0, 0), (size, 8)], fill=accent_color)
+    draw.rectangle([(0, 0), (8, size)], fill=accent_color)
+    draw.rectangle([(IMG_WIDTH - size, 0), (IMG_WIDTH, 8)], fill=accent_color)
+    draw.rectangle([(IMG_WIDTH - 8, 0), (IMG_WIDTH, size)], fill=accent_color)
+
+    font_rubric = _load_font(FONT_PATH, 28)
+    rubric_text = _strip_unrenderable(rubric)
+    draw.text((TEXT_MARGIN, 36), rubric_text, font=font_rubric, fill=muted)
+
+    if percent is not None:
+        badge = f"лише {int(percent)}%"
+        font_badge = _load_font(FONT_PATH, 26)
+        badge_w = _text_width(badge, font_badge) + 36
+        badge_h = 44
+        badge_x = IMG_WIDTH - TEXT_MARGIN - badge_w
+        badge_y = 28
+        draw.rounded_rectangle(
+            [(badge_x, badge_y), (badge_x + badge_w, badge_y + badge_h)],
+            radius=22,
+            fill=accent_color,
+        )
+        draw.text(
+            (badge_x + 18, badge_y + 8),
+            badge,
+            font=font_badge,
+            fill=bg_color,
+        )
+
+    # Зона задачі: моноширинний вигляд через великий bold і збереження пробілів.
+    clean_body = _strip_unrenderable(body or "").rstrip()
+    body_lines = [line for line in clean_body.split("\n")] if clean_body else []
+    # Довгі рядки без переносу ламають піраміду — підганяємо кегль.
+    max_body_w = IMG_WIDTH - TEXT_MARGIN * 2
+    font_size = 72 if len(body_lines) <= 3 else (58 if len(body_lines) <= 5 else 48)
+    font_body = _load_font(FONT_PATH, font_size)
+    while font_size > 32:
+        widest = max((_text_width(line, font_body) for line in body_lines), default=0)
+        if widest <= max_body_w:
+            break
+        font_size -= 4
+        font_body = _load_font(FONT_PATH, font_size)
+
+    line_gap = max(52, font_size + 10)
+    body_h = len(body_lines) * line_gap
+    # Залишаємо місце під питання й футер.
+    prompt_budget = 110 if prompt else 40
+    start_y = max(100, (IMG_HEIGHT - body_h - prompt_budget) // 2)
+
+    for index, line in enumerate(body_lines[:8]):
+        width = _text_width(line, font_body)
+        draw.text(
+            ((IMG_WIDTH - width) // 2, start_y + index * line_gap),
+            line,
+            font=font_body,
+            fill=white,
+        )
+
+    if prompt:
+        font_prompt = _load_font(FONT_PATH_REGULAR, 34)
+        clean_prompt = _strip_unrenderable(prompt)
+        wrapped = _wrap_text_to_width(clean_prompt, font_prompt, max_body_w) or ""
+        prompt_lines = wrapped.split("\n")[:2]
+        prompt_y = start_y + body_h + 28
+        for index, line in enumerate(prompt_lines):
+            width = _text_width(line, font_prompt)
+            draw.text(
+                ((IMG_WIDTH - width) // 2, prompt_y + index * 40),
+                line,
+                font=font_prompt,
+                fill=accent_color,
+            )
+
+    font_hint = _load_font(FONT_PATH_REGULAR, 26)
+    hint = "Голосуй нижче · ~30 секунд"
+    hint_w = _text_width(hint, font_hint)
+    draw.text(
+        ((IMG_WIDTH - hint_w) // 2, IMG_HEIGHT - 56),
+        hint,
+        font=font_hint,
+        fill=muted,
+    )
+
+    return _save_image(img)
+
+
+def generate_flag_image(
+    flag_png: bytes,
+    template: dict,
+    caption: str = "",
+    hint: str = "",
+) -> bytes:
+    """Картка з прапором для рубрики про країни.
+
+    `caption` — великий підпис під прапором (питання або назва країни),
+    `hint` — дрібний рядок унизу.
+    """
+    bg_color     = _hex_to_rgb(template["bg"])
+    accent_color = _hex_to_rgb(template["accent"])
+    white        = (255, 255, 255)
+
+    img  = Image.new("RGB", (IMG_WIDTH, IMG_HEIGHT), bg_color)
+    draw = ImageDraw.Draw(img)
+
+    # Акцентні кути — той самий почерк, що й у картці квізу.
+    size = 60
+    draw.rectangle([(0, 0), (size, 8)], fill=accent_color)
+    draw.rectangle([(0, 0), (8, size)], fill=accent_color)
+    draw.rectangle([(IMG_WIDTH - size, 0), (IMG_WIDTH, 8)], fill=accent_color)
+    draw.rectangle([(IMG_WIDTH - 8, 0), (IMG_WIDTH, size)], fill=accent_color)
+
+    box_width, box_height = 720, 420
+    top = 90
+
+    if flag_png:
+        try:
+            flag = Image.open(io.BytesIO(flag_png)).convert("RGB")
+            scale = min(box_width / flag.width, box_height / flag.height)
+            new_size = (max(1, int(flag.width * scale)), max(1, int(flag.height * scale)))
+            flag = flag.resize(new_size, Image.LANCZOS)
+            left = (IMG_WIDTH - flag.width) // 2
+            offset_y = top + (box_height - flag.height) // 2
+            # Рамка обов'язкова: у прапорів з білими смугами (Японія, Польща)
+            # інакше не видно, де закінчується полотнище.
+            draw.rectangle(
+                [(left - 3, offset_y - 3), (left + flag.width + 2, offset_y + flag.height + 2)],
+                outline=white,
+                width=3,
+            )
+            img.paste(flag, (left, offset_y))
+        except Exception as error:
+            logger.warning("[images] Прапор не намалювався: %s", error)
+
+    if caption:
+        font_caption = _load_font(FONT_PATH, 58)
+        max_width = IMG_WIDTH - TEXT_MARGIN * 2
+        lines = (_wrap_text_to_width(caption, font_caption, max_width) or "").split("\n")
+        line_y = top + box_height + 40
+        for index, line in enumerate(lines[:2]):
+            width = _text_width(line, font_caption)
+            draw.text(
+                ((IMG_WIDTH - width) // 2, line_y + index * 62),
+                line,
+                font=font_caption,
+                fill=white,
+            )
+
+    if hint:
+        font_hint = _load_font(FONT_PATH_REGULAR, 28)
+        clean_hint = _strip_unrenderable(hint)
+        width = _text_width(clean_hint, font_hint)
+        draw.text(
+            ((IMG_WIDTH - width) // 2, IMG_HEIGHT - 56),
+            clean_hint,
+            font=font_hint,
+            fill=accent_color,
+        )
+
+    return _save_image(img)
+
+
 # ─────────────────────────────────────────
 # ДОПОМІЖНА ФУНКЦІЯ
 # ─────────────────────────────────────────
@@ -888,6 +1070,14 @@ async def generate_post_image_async(**kwargs) -> bytes:
 
 async def generate_quiz_image_async(**kwargs) -> bytes:
     return await asyncio.to_thread(generate_quiz_image, **kwargs)
+
+
+async def generate_brain_image_async(**kwargs) -> bytes:
+    return await asyncio.to_thread(generate_brain_image, **kwargs)
+
+
+async def generate_flag_image_async(**kwargs) -> bytes:
+    return await asyncio.to_thread(generate_flag_image, **kwargs)
 
 
 async def generate_chart_image_async(**kwargs) -> bytes:

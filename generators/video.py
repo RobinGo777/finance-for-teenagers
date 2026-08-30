@@ -166,8 +166,9 @@ def _queries_for_day(day: date | None = None) -> list[tuple[str, str]]:
 
 
 def _search_cache_key(query: str, hours: int, min_views: int) -> str:
+    # Версія в ключі: після зміни параметрів пошуку старий кеш не підмішується.
     digest = hashlib.sha256(
-        f"{query}|{hours}|{min_views}".encode()
+        f"v2|{query}|{hours}|{min_views}".encode()
     ).hexdigest()[:16]
     return f"youtube:search:{digest}"
 

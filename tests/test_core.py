@@ -544,20 +544,28 @@ class BanknoteFilterTests(unittest.TestCase):
         )
 
     def test_filter_dedupes_and_ranks(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
         from data.banknotes import filter_banknote_candidates
+
+        # Дати відносні: із жорсткою датою тест починає падати, щойно вона
+        # виходить за вікно lookback_days.
+        def ago(hours: int) -> str:
+            moment = datetime.now(timezone.utc) - timedelta(hours=hours)
+            return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         items = [
             {
                 "title": "Bank of X unveils new 20 polymer banknote series",
                 "summary": "New series enters circulation next month",
                 "url": "https://example.com/a?utm=1",
-                "published": "2026-08-01T12:00:00Z",
+                "published": ago(25),
             },
             {
                 "title": "Bank of X unveils new 20 polymer banknote series",
                 "summary": "New series enters circulation next month",
                 "url": "https://www.example.com/a",
-                "published": "2026-08-01T13:00:00Z",
+                "published": ago(24),
             },
             {
                 "title": "Collectors auction rare banknote for record price",

@@ -2,7 +2,10 @@ import asyncio
 import feedparser
 import httpx
 import logging
+import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+
 from config import (
     COINGECKO_URL,
     NBU_URL,
@@ -13,10 +16,33 @@ from config import (
     WORLD_BANK_URL,
     RSS_FEEDS,
     YOUTUBE_MIN_VIEWS,
+    YOUTUBE_SEARCH_ORDER,
+    VIDEO_MIN_DURATION_SEC,
+    VIDEO_MAX_DURATION_SEC,
 )
 from utils.http_safe import redact_secrets
 
 logger = logging.getLogger(__name__)
+
+# ISO 8601 тривалість з YouTube contentDetails, напр. PT9M54S / P1DT2H.
+_ISO_DURATION_RE = re.compile(
+    r"^P(?:(?P<days>\d+)D)?"
+    r"(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$"
+)
+
+
+def parse_iso_duration(value: str) -> int:
+    """Повертає тривалість у секундах; 0 — якщо розібрати не вдалося."""
+    match = _ISO_DURATION_RE.match((value or "").strip())
+    if not match:
+        return 0
+    parts = {k: int(v) for k, v in match.groupdict(default="0").items()}
+    return (
+        parts["days"] * 86400
+        + parts["hours"] * 3600
+        + parts["minutes"] * 60
+        + parts["seconds"]
+    )
 
 
 class YouTubeQuotaExceeded(Exception):
@@ -244,8 +270,10 @@ async def fetch_youtube_videos(
     min_views: int | None = None,
 ) -> list:
     """
-    Шукає свіжі короткі відео на YouTube.
-    Фільтрує по мінімальній кількості переглядів (min_views, за замовч. YOUTUBE_MIN_VIEWS).
+    Шукає свіжі відео на YouTube за релевантністю.
+    Фільтрує по переглядах (min_views, за замовч. YOUTUBE_MIN_VIEWS) і по
+    тривалості (VIDEO_MIN_DURATION_SEC..VIDEO_MAX_DURATION_SEC), щоб відсіяти
+    Shorts і багатогодинні стріми.
     При 429 піднімає YouTubeQuotaExceeded — викликач має зупинити подальші пошуки.
     """
     views_threshold = YOUTUBE_MIN_VIEWS if min_views is None else min_views
@@ -258,8 +286,7 @@ async def fetch_youtube_videos(
         "part": "snippet",
         "q": query,
         "type": "video",
-        "videoDuration": "short",
-        "order": "date",
+        "order": YOUTUBE_SEARCH_ORDER,
         "publishedAfter": published_after,
         "maxResults": max_results,
         "relevanceLanguage": "en",   # зміщуємо видачу в бік англомовного контенту
@@ -279,7 +306,7 @@ async def fetch_youtube_videos(
     # Витягуємо статистику для фільтрації по переглядах
     stats_url = "https://www.googleapis.com/youtube/v3/videos"
     stats_params = {
-        "part": "statistics,snippet",
+        "part": "statistics,snippet,contentDetails",
         "id": ",".join(video_ids),
         "key": YOUTUBE_API_KEY,
     }
@@ -292,20 +319,30 @@ async def fetch_youtube_videos(
     videos = []
     for item in stats_data.get("items", []):
         views = int(item["statistics"].get("viewCount", 0))
-        if views >= views_threshold:
-            snippet = item["snippet"]
-            videos.append({
-                "video_id": item["id"],
-                "title": snippet["title"],
-                "channel": snippet["channelTitle"],
-                "description": snippet.get("description", ""),
-                "views": views,
-                "published": snippet["publishedAt"],
-                "thumbnail": snippet["thumbnails"]["high"]["url"],
-                "url": f"https://youtu.be/{item['id']}",
-                # Мова аудіо/опису — щоб відсіювати неангломовні ролики.
-                "language": snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or "",
-            })
+        if views < views_threshold:
+            continue
+
+        duration_sec = parse_iso_duration(
+            (item.get("contentDetails") or {}).get("duration", "")
+        )
+        # 0 = стрім або нерозпізнаний формат; такі для рубрики не годяться.
+        if not VIDEO_MIN_DURATION_SEC <= duration_sec <= VIDEO_MAX_DURATION_SEC:
+            continue
+
+        snippet = item["snippet"]
+        videos.append({
+            "video_id": item["id"],
+            "title": snippet["title"],
+            "channel": snippet["channelTitle"],
+            "description": snippet.get("description", ""),
+            "views": views,
+            "duration_sec": duration_sec,
+            "published": snippet["publishedAt"],
+            "thumbnail": snippet["thumbnails"]["high"]["url"],
+            "url": f"https://youtu.be/{item['id']}",
+            # Мова аудіо/опису — щоб відсіювати неангломовні ролики.
+            "language": snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or "",
+        })
 
     return sorted(videos, key=lambda x: x["views"], reverse=True)
 
@@ -331,3 +368,217 @@ async def fetch_reddit(subreddit: str = "technology", limit: int = 5) -> list:
         for p in posts
         if not p["data"].get("stickied")
     ]
+
+
+# ─────────────────────────────────────────
+# WIKIDATA + FLAGCDN — країни та прапори
+# ─────────────────────────────────────────
+# REST Countries із 2026-го вимагає ключ (v1–v4 вимкнули, v5 — тільки з
+# Authorization), тому країни беремо з Wikidata: без ключа, українські назви
+# в комплекті, і те саме джерело потрібне для рубрики фактів.
+
+_WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
+_WIKI_USER_AGENT = "FinProBot/1.0 (Telegram channel for teens)"
+
+# Q3624078 — суверенна держава; P576 відсіює вже неіснуючі країни.
+_COUNTRIES_QUERY = """
+SELECT ?iso ?countryLabel ?capitalLabel ?population ?area
+       ?currencyLabel ?languageLabel ?continentLabel WHERE {
+  ?country wdt:P31 wd:Q3624078 ;
+           wdt:P297 ?iso .
+  FILTER NOT EXISTS { ?country wdt:P576 ?dissolved }
+  OPTIONAL { ?country wdt:P36 ?capital }
+  OPTIONAL { ?country wdt:P1082 ?population }
+  OPTIONAL { ?country wdt:P2046 ?area }
+  OPTIONAL { ?country wdt:P38 ?currency }
+  OPTIONAL { ?country wdt:P37 ?language }
+  OPTIONAL { ?country wdt:P30 ?continent }
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "uk". }
+}
+"""
+
+
+def _sparql_value(row: dict, key: str) -> str:
+    return ((row.get(key) or {}).get("value") or "").strip()
+
+
+def _has_cyrillic(text: str) -> bool:
+    return any("\u0400" <= char <= "\u04ff" for char in text)
+
+
+async def fetch_countries() -> list:
+    """Країни з Wikidata: українська назва, столиця, населення, валюта.
+
+    Запит повільний (~10 с) і вертає кілька рядків на країну, коли значень
+    декілька, тому результат варто кешувати, а не тягнути перед кожним постом.
+    """
+    response = await _get_client().get(
+        _WIKIDATA_SPARQL,
+        params={"query": _COUNTRIES_QUERY, "format": "json"},
+        headers={"User-Agent": _WIKI_USER_AGENT},
+        timeout=60,
+    )
+    _raise_for_status(response)
+
+    by_code: dict[str, dict] = {}
+    for row in (response.json().get("results") or {}).get("bindings") or []:
+        code = _sparql_value(row, "iso").lower()
+        name = _sparql_value(row, "countryLabel")
+        # Без української назви країна нам не підходить: Wikidata в такому разі
+        # віддає англійську або взагалі Q-код.
+        if len(code) != 2 or not name or not _has_cyrillic(name):
+            continue
+        if code in by_code:
+            continue
+
+        try:
+            population = int(float(_sparql_value(row, "population") or 0))
+        except ValueError:
+            population = 0
+        try:
+            area = float(_sparql_value(row, "area") or 0)
+        except ValueError:
+            area = 0.0
+
+        by_code[code] = {
+            "code": code,
+            "name_uk": name,
+            "capital": _sparql_value(row, "capitalLabel"),
+            "population": population,
+            "area": area,
+            "currency": _sparql_value(row, "currencyLabel"),
+            "language": _sparql_value(row, "languageLabel"),
+            "continent": _sparql_value(row, "continentLabel"),
+        }
+    return sorted(by_code.values(), key=lambda item: item["name_uk"])
+
+
+# Факти для однієї країни: сусіди, води, бік руху. Запит дрібний (~2 с), тому
+# робимо його на вибрану країну, а не на весь довідник.
+_COUNTRY_EXTRAS_QUERY = """
+SELECT ?neighbourName ?waterName ?sideName ?typeName ?languageName WHERE {
+  ?country wdt:P297 "%s" .
+  OPTIONAL {
+    ?country wdt:P31 ?type .
+    ?type rdfs:label ?typeName .
+    FILTER(LANG(?typeName) = "uk")
+  }
+  OPTIONAL {
+    ?country wdt:P37 ?language .
+    ?language rdfs:label ?languageName .
+    FILTER(LANG(?languageName) = "uk")
+  }
+  OPTIONAL {
+    ?country wdt:P47 ?neighbour .
+    ?neighbour rdfs:label ?neighbourName .
+    FILTER(LANG(?neighbourName) = "uk")
+  }
+  OPTIONAL {
+    ?country wdt:P206 ?water .
+    ?water rdfs:label ?waterName .
+    FILTER(LANG(?waterName) = "uk")
+  }
+  OPTIONAL {
+    ?country wdt:P1622 ?side .
+    ?side rdfs:label ?sideName .
+    FILTER(LANG(?sideName) = "uk")
+  }
+}
+"""
+
+
+async def fetch_country_extras(country_code: str) -> dict:
+    """Сусіди, води та бік руху для країни за ISO-кодом.
+
+    P47 включає й морських сусідів (для Японії це, наприклад, США), тому
+    викликаючий код сам вирішує, як їх подавати.
+    """
+    code = (country_code or "").strip().upper()
+    if len(code) != 2:
+        return {}
+
+    try:
+        response = await _get_client().get(
+            _WIKIDATA_SPARQL,
+            params={"query": _COUNTRY_EXTRAS_QUERY % code, "format": "json"},
+            headers={"User-Agent": _WIKI_USER_AGENT},
+            timeout=30,
+        )
+        _raise_for_status(response)
+    except Exception as error:
+        logger.warning("[country] Додаткові факти для %s не прийшли: %s", code, error)
+        return {}
+
+    neighbours: set[str] = set()
+    waters: set[str] = set()
+    sides: set[str] = set()
+    types: set[str] = set()
+    languages: set[str] = set()
+    for row in (response.json().get("results") or {}).get("bindings") or []:
+        if name := _sparql_value(row, "neighbourName"):
+            neighbours.add(name)
+        if name := _sparql_value(row, "waterName"):
+            waters.add(name)
+        if name := _sparql_value(row, "sideName"):
+            sides.add(name)
+        if name := _sparql_value(row, "typeName"):
+            types.add(name.lower())
+        if name := _sparql_value(row, "languageName"):
+            languages.add(name)
+
+    return {
+        "neighbours": sorted(neighbours),
+        "waters": sorted(waters),
+        "languages": sorted(languages),
+        "drives_left": any("ліво" in side for side in sides),
+        "is_island": any("острівна" in item for item in types),
+        "landlocked": any("виходу до моря" in item for item in types),
+    }
+
+
+async def fetch_flag_png(country_code: str, width: int = 640) -> bytes:
+    """PNG прапора з FlagCDN. Порожньо — якщо картинки немає."""
+    code = (country_code or "").strip().lower()
+    if not code:
+        return b""
+
+    url = f"https://flagcdn.com/w{width}/{code}.png"
+    try:
+        response = await _get_client().get(url)
+        # FlagCDN на невідомий код віддає 404, а не картинку.
+        _raise_for_status(response)
+    except Exception as error:
+        logger.warning("[flagcdn] Прапор %s недоступний: %s", code, error)
+        return b""
+    return response.content
+
+
+# ─────────────────────────────────────────
+# ВІКІПЕДІЯ — короткий опис українською
+# ─────────────────────────────────────────
+
+async def fetch_wikipedia_summary(title: str, lang: str = "uk") -> dict:
+    """Короткий опис статті: {title, extract, url}. Порожньо — якщо не знайшли."""
+    if not (title or "").strip():
+        return {}
+
+    url = (
+        f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/"
+        f"{quote(title.strip().replace(' ', '_'), safe='')}"
+    )
+    try:
+        response = await _get_client().get(url, headers={"User-Agent": _WIKI_USER_AGENT})
+        _raise_for_status(response)
+    except Exception as error:
+        logger.warning("[wiki] %s: %s", title, error)
+        return {}
+
+    data = response.json() or {}
+    # Сторінки-роздільники змісту не мають — для нас це те саме, що й нічого.
+    if data.get("type") == "disambiguation":
+        return {}
+    return {
+        "title": (data.get("title") or "").strip(),
+        "extract": (data.get("extract") or "").strip(),
+        "url": ((data.get("content_urls") or {}).get("desktop") or {}).get("page", ""),
+    }

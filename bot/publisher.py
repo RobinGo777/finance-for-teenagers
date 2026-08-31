@@ -3,6 +3,8 @@ import html
 import logging
 import re
 import time
+from importlib import import_module
+
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, MODERATOR_CHAT_ID
@@ -12,13 +14,14 @@ from data.redis_client import (
     add_quiz_pending_id,
     clear_quiz_pending,
 )
+from utils.text_quality import find_banned_phrases
 
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 # Хештеги (#Слово) у публікаціях каналу не використовуємо.
-_HASHTAG_RE = re.compile(r"(?<!\w)#[\wА-Яа-яЁёІіЇїЄєҐґ]+", re.UNICODE)
+_HASHTAG_RE = re.compile(r"(?<!\w)#([\wА-Яа-яЁёІіЇїЄєҐґ]+)", re.UNICODE)
 
 
 async def notify_moderator(text: str) -> None:
@@ -43,10 +46,20 @@ MESSAGE_LIMIT   = 4096   # звичайне повідомлення
 POLL_QUESTION_LIMIT = 300
 POLL_OPTION_LIMIT   = 100
 
+# Рубрики, що публікуються як опитування з відкладеним розв'язком.
+# Рубрика → де взяти пост із відповіддю. Решта опитувальних — через quiz.
+_ANSWER_GENERATORS = {
+    "brain": ("generators.brain", "generate_brain_answer"),
+    "country_guess": ("generators.country", "generate_country_answer"),
+}
+
+# Рубрики, що публікуються як Telegram Poll (питання + варіанти + відповідь).
+POLL_QUIZ_RUBRICS = frozenset({"quiz", *_ANSWER_GENERATORS})
+
 
 def _strip_hashtags(text: str) -> str:
-    """Прибирає #хештеги з тексту поста, зберігаючи emoji і зміст."""
-    cleaned = _HASHTAG_RE.sub("", text or "")
+    """Прибирає символ # з тексту поста, зберігаючи emoji, назву рубрики і зміст."""
+    cleaned = _HASHTAG_RE.sub(r"\1", text or "")
     lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in cleaned.split("\n")]
     while lines and not lines[0]:
         lines.pop(0)
@@ -81,6 +94,17 @@ def _prepare_html(text: str, limit: int) -> str:
 
 def _clean_poll_question(text: str) -> str:
     return (text or "").strip()[:POLL_QUESTION_LIMIT]
+
+
+def _poll_prompt(post_data: dict) -> str:
+    """Питання для опитування.
+
+    Логічні задачі мають довгу умову: вона йде в підпис до картинки, а в
+    опитування — окреме коротке питання (ліміт Telegram — 300 символів).
+    """
+    return _clean_poll_question(
+        post_data.get("poll_question") or post_data.get("question", "")
+    )
 
 
 def _clean_poll_options(options: list) -> list:
@@ -141,7 +165,7 @@ async def _send_photo_with_text(chat_id, photo, text: str) -> int:
 
 def _test_preview_text(post_data: dict) -> str:
     """Формує повний текст тестового прев'ю для звичайного поста або квізу."""
-    if post_data.get("rubric") != "quiz":
+    if post_data.get("rubric") not in POLL_QUIZ_RUBRICS:
         text = _strip_hashtags(post_data.get("post", "") or "(генератор не повернув текст поста)")
         poll_options = _clean_poll_options(post_data.get("poll_options", []))
         if poll_options:
@@ -168,7 +192,7 @@ def _test_preview_text(post_data: dict) -> str:
 
 def _moderation_body(post_data: dict) -> str:
     """Текст для картки модерації: для квізу показує питання + варіанти."""
-    if post_data.get("rubric") == "quiz":
+    if post_data.get("rubric") in POLL_QUIZ_RUBRICS:
         options = _clean_poll_options(post_data.get("options", []))
         correct_index = post_data.get("correct_index", 0)
         answer = (
@@ -198,6 +222,7 @@ async def send_test_preview(post_data: dict) -> None:
     неможливо випадково відправити в канал.
     """
     rubric = post_data.get("rubric", "unknown")
+    banned = find_banned_phrases(_moderation_body(post_data))
     header = (
         "🧪 ТЕСТОВЕ ПРЕВ'Ю\n"
         f"Рубрика: {rubric}\n"
@@ -205,6 +230,8 @@ async def send_test_preview(post_data: dict) -> None:
         f"Персона: {post_data.get('persona', '—')}\n"
         f"Шаблон: {post_data.get('template', '—')}"
     )
+    if banned:
+        header += f"\n⚠️ Штампи: {', '.join(banned)}"
 
     image = post_data.get("image")
     image_url = post_data.get("image_url")
@@ -226,8 +253,8 @@ async def send_test_preview(post_data: dict) -> None:
     for chunk in _split_message(_test_preview_text(post_data)):
         await bot.send_message(chat_id=MODERATOR_CHAT_ID, text=chunk)
 
-    if rubric == "quiz":
-        question = _clean_poll_question(post_data.get("question", ""))
+    if rubric in POLL_QUIZ_RUBRICS:
+        question = _poll_prompt(post_data)
         options = _clean_poll_options(post_data.get("options", []))
         if question and len(options) >= 2:
             await bot.send_poll(
@@ -281,8 +308,8 @@ async def publish_to_channel(post_data: dict) -> int | None:
     image    = post_data.get("image")          # bytes (Pillow)
     image_url = post_data.get("image_url")     # str (YouTube thumbnail)
 
-    # ── Квіз → Telegram Poll ──
-    if rubric == "quiz":
+    # ── Квіз і тренажер мозку → Telegram Poll ──
+    if rubric in POLL_QUIZ_RUBRICS:
         return await _publish_quiz(post_data)
 
     # ── Пост з опитуванням (#ФінТруКрайм) ──
@@ -310,7 +337,7 @@ async def publish_to_channel(post_data: dict) -> int | None:
 async def _publish_quiz(post_data: dict) -> int | None:
     """Публікує квіз як Telegram Poll + зберігає дані для відповіді через 24 год."""
 
-    question = _clean_poll_question(post_data.get("question", ""))
+    question = _poll_prompt(post_data)
     options  = _clean_poll_options(post_data.get("options", []))
 
     # Telegram вимагає щонайменше 2 варіанти
@@ -321,10 +348,13 @@ async def _publish_quiz(post_data: dict) -> int | None:
     image = post_data.get("image")
     if image:
         photo = BufferedInputFile(image, filename="quiz.png")
+        caption = post_data.get("caption") or (
+            f"🧠 ФінКвіз\n\n{post_data.get('question', '')}"
+        )
         await bot.send_photo(
             chat_id=TELEGRAM_CHANNEL_ID,
             photo=photo,
-            caption=_prepare_html(f"🧠 ФінКвіз\n\n{post_data.get('question', '')}", CAPTION_LIMIT),
+            caption=_prepare_html(caption, CAPTION_LIMIT),
             parse_mode="HTML",
         )
 
@@ -341,12 +371,17 @@ async def _publish_quiz(post_data: dict) -> int | None:
 
     # Зберігаємо в Redis для відповіді через ~24 год.
     # created_at потрібен, щоб крон публікував відповідь лише коли квіз «дозрів».
-    await save_quiz_pending(msg.poll.id, {
+    pending = {
+        "rubric": post_data.get("rubric", "quiz"),
         "correct_index": post_data.get("correct_index", 0),
         "lamp_post": post_data.get("lamp_post", ""),
         "message_id": msg.message_id,
         "created_at": time.time(),
-    })
+    }
+    if post_data.get("brain_level") is not None:
+        pending["brain_level"] = post_data["brain_level"]
+        pending["brain_kind"] = post_data.get("brain_kind", "")
+    await save_quiz_pending(msg.poll.id, pending)
     await add_quiz_pending_id(msg.poll.id)
 
     return msg.message_id
@@ -388,8 +423,7 @@ async def _publish_with_poll(post_data: dict) -> int | None:
 
 
 async def publish_quiz_answer(poll_id: str, poll_results: dict) -> None:
-    """Публікує 💡 відповідь на квіз через 24 год."""
-    from generators.quiz import generate_quiz_answer
+    """Публікує 💡 відповідь на квіз або розв'язок тренажера через ~24 год."""
     from data.redis_client import get_quiz_pending
 
     # Анонімні опитування в каналі не дають poll_answer — беремо підсумки через stop_poll.
@@ -412,7 +446,12 @@ async def publish_quiz_answer(poll_id: str, poll_results: dict) -> None:
                 e,
             )
 
-    lamp_post = await generate_quiz_answer(poll_id, results)
+    module_name, function_name = _ANSWER_GENERATORS.get(
+        (pending or {}).get("rubric"),
+        ("generators.quiz", "generate_quiz_answer"),
+    )
+    build_answer = getattr(import_module(module_name), function_name)
+    lamp_post = await build_answer(poll_id, results)
     if lamp_post:
         await bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,
@@ -459,11 +498,16 @@ async def send_to_moderator(post_data: dict) -> None:
     # Для квізу поля "post" немає — показуємо питання, варіанти й правильну
     # відповідь, щоб модератор бачив, що саме публікується.
     body = _moderation_body(post_data)
+    banned = find_banned_phrases(body)
+    if banned:
+        logger.warning("[%s] роботизовані фрази в пості: %s", rubric, ", ".join(banned))
+    warn_line = f"⚠️ Штампи: {', '.join(banned)}\n\n" if banned else ""
     caption = (
         f"📋 Новий пост на модерацію\n\n"
         f"Рубрика: {rubric}\n"
         f"Персона: {persona}\n"
         f"Шаблон: {tmpl}\n\n"
+        f"{warn_line}"
         f"─────────────────\n"
         f"{body[:800]}{'...' if len(body) > 800 else ''}"
     )
@@ -494,8 +538,8 @@ async def send_to_moderator(post_data: dict) -> None:
 
     # Прев'ю самого опитування, щоб модератор бачив інтерактив (анонімно,
     # щоб не плутати зі справжніми голосами в каналі).
-    if rubric == "quiz":
-        q = _clean_poll_question(post_data.get("question", ""))
+    if rubric in POLL_QUIZ_RUBRICS:
+        q = _poll_prompt(post_data)
         opts = _clean_poll_options(post_data.get("options", []))
         if q and len(opts) >= 2:
             await bot.send_poll(

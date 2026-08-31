@@ -300,6 +300,91 @@ async def clear_optional_gemini_budget() -> None:
 
 
 # ─────────────────────────────────────────
+# ТРЕНАЖЕР МОЗКУ: рівень, дедуп задач, статистика
+# ─────────────────────────────────────────
+
+_BRAIN_LEVEL_KEY = "brain:level"
+_BRAIN_STATS_KEY = "brain:stats"
+
+
+async def get_brain_level(default: int) -> int:
+    value = await get(_BRAIN_LEVEL_KEY)
+    try:
+        return int(value) if value else default
+    except (TypeError, ValueError):
+        return default
+
+
+async def set_brain_level(level: int) -> None:
+    await set_value(_BRAIN_LEVEL_KEY, str(level))
+
+
+async def is_brain_puzzle_seen(fingerprint: str) -> bool:
+    return bool(await get(f"brain:seen:{fingerprint}"))
+
+
+async def mark_brain_puzzle_seen(fingerprint: str, ttl_days: int) -> None:
+    await set_value(f"brain:seen:{fingerprint}", "1", ex=max(1, ttl_days) * 86400)
+
+
+async def get_brain_stats() -> dict:
+    """Накопичена статистика рубрики: раунди, точність, серії."""
+    raw = await get(_BRAIN_STATS_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+async def save_brain_stats(stats: dict) -> None:
+    await set_value(_BRAIN_STATS_KEY, json.dumps(stats, ensure_ascii=False))
+
+
+# ─────────────────────────────────────────
+# КРАЇНИ: кеш довідника + дедуп показаних
+# ─────────────────────────────────────────
+
+_COUNTRIES_CACHE_KEY = "countries:catalog"
+
+
+async def get_countries_cache() -> list:
+    """Кешований довідник країн. Порожньо — треба тягнути з Wikidata."""
+    raw = await get(_COUNTRIES_CACHE_KEY)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+async def save_countries_cache(countries: list, ttl_days: int) -> None:
+    """SPARQL-запит важкий (десятки секунд), тому тримаємо його тижнями."""
+    if not countries:
+        return
+    await set_value(
+        _COUNTRIES_CACHE_KEY,
+        json.dumps(countries, ensure_ascii=False),
+        ex=max(1, ttl_days) * 86400,
+    )
+
+
+async def is_country_used(code: str, mode: str) -> bool:
+    """Чи показували цю країну в цьому режимі рубрики."""
+    if not code:
+        return False
+    return bool(await get(f"country:used:{mode}:{code}"))
+
+
+async def mark_country_used(code: str, mode: str, ttl_days: int) -> None:
+    await set_value(f"country:used:{mode}:{code}", "1", ex=max(1, ttl_days) * 86400)
+
+
+# ─────────────────────────────────────────
 # ВІДЕО: черга на наступні дні
 # ─────────────────────────────────────────
 

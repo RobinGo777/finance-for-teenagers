@@ -17,15 +17,24 @@ MODERATOR_CHAT_ID    = int(os.getenv("MODERATOR_CHAT_ID", "0"))  # твій Tele
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Flash-моделі для текстових постів — пріоритет.
-# 2.0-flash і flash-latest: 3.5-flash часто дає 503/таймаут.
+# Спершу конкретні версії, аліас `flash-latest` — в кінець: він періодично
+# віддає 503 і таймаути, бо за ним стоїть найзавантаженіша модель.
 _GEMINI_FLASH_ORDER = (
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-001",
-    "gemini-flash-latest",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
-    "gemini-2.5-flash",
-    "gemini-1.5-flash",
+    "gemini-flash-latest",
+)
+
+# Моделі, які Google вже вивів з обігу: віддають 404 «no longer available».
+# Тримаємо окремо, бо застаріле значення в .env інакше з'їдає половину
+# ланцюжка — і один 503 на решті валить увесь пост.
+_GEMINI_RETIRED = (
+    "gemini-1.0",
+    "gemini-1.5",
+    "gemini-2.0",
+    "gemini-2.5",
 )
 
 # Спеціалізовані моделі — не для генерації постів (image/tts/embedding/live тощо).
@@ -45,13 +54,16 @@ _GEMINI_MODEL_BLOCKLIST = (
 )
 
 # Скільки моделей максимум пробуємо за один запит (щоб не палити квоту каскадом).
-GEMINI_MAX_MODELS_PER_REQUEST = int(os.getenv("GEMINI_MAX_MODELS_PER_REQUEST", "2"))
+# Менше трьох — ризиковано: 503 на одній моделі означає втрачений пост.
+GEMINI_MAX_MODELS_PER_REQUEST = int(os.getenv("GEMINI_MAX_MODELS_PER_REQUEST", "4"))
 
 
 def _is_usable_text_model(name: str) -> bool:
-    """True лише для flash-моделей генерації тексту."""
+    """True лише для живих flash-моделей генерації тексту."""
     n = name.lower()
     if "-pro" in n or n.endswith("pro-latest"):
+        return False
+    if any(n.startswith(retired) for retired in _GEMINI_RETIRED):
         return False
     return not any(marker in n for marker in _GEMINI_MODEL_BLOCKLIST)
 
@@ -72,22 +84,25 @@ def _normalize_gemini_models(raw: list[str]) -> list[str]:
             ordered.append(model)
             seen.add(model)
 
-    # Завжди тримаємо 2.0-flash у ланцюгу (найстабільніший на free tier).
-    if "gemini-2.0-flash" not in seen:
-        ordered.insert(0, "gemini-2.0-flash")
-    elif ordered and ordered[0] != "gemini-2.0-flash" and "gemini-2.0-flash" in ordered:
-        ordered.remove("gemini-2.0-flash")
-        ordered.insert(0, "gemini-2.0-flash")
-
     cap = max(1, GEMINI_MAX_MODELS_PER_REQUEST)
-    return ordered[:cap] or ["gemini-2.0-flash", "gemini-flash-latest"]
+
+    # Добиваємо ланцюжок відомими живими моделями до ліміту: якщо в .env лишились
+    # одна-дві назви (чи мертві), один 503 не має валити пост.
+    for model in _GEMINI_FLASH_ORDER:
+        if len(ordered) >= cap:
+            break
+        if model not in seen:
+            ordered.append(model)
+            seen.add(model)
+
+    return ordered[:cap] or list(_GEMINI_FLASH_ORDER[:2])
 
 
 _GEMINI_RAW = [
     model.strip().removeprefix("models/")
     for model in os.getenv(
         "GEMINI_MODELS",
-        "gemini-2.0-flash,gemini-flash-latest",
+        ",".join(_GEMINI_FLASH_ORDER),
     ).split(",")
     if model.strip()
 ]
@@ -226,6 +241,58 @@ PERSONAS = [
 ]
 
 # ─────────────────────────────────────────
+# РЕДАКЦІЙНИЙ БРИФ — роль моделі перед персоною
+# ─────────────────────────────────────────
+# Модель працює як команда, а не як чат-бот: стратегія + копірайтинг +
+# креатив + робота зі спільнотою. Ціль ланцюжка: увага → дочитування →
+# довіра → підписка → коментар.
+EDITORIAL_TEAM_BRIEF = (
+    "Ти працюєш одночасно як content strategist, копірайтер, креативний "
+    "директор, community manager і аналітик каналу — не як чат-бот. "
+    "Ланцюг цілей кожного посту: зачепити з першого рядка → дати дочитати "
+    "до кінця → залишити відчуття «тут пишуть нормально» → отримати "
+    "коментар чи збереження. Пост мусить читатися так, ніби його написала "
+    "жива людина, якій самій цікава тема, а не згенерував асистент."
+)
+
+# Ротація зачіпок — щоб пости не починалися однаково.
+POST_HOOK_STYLES = [
+    "почни з конкретної цифри або факту, який ламає очікування",
+    "почни з короткої сцени на 1–2 речення, у яку читач може себе поставити",
+    "почни одразу з суті, без розгону — перше речення вже по темі",
+    "почни з несподіваного порівняння з побутовою річчю",
+    "почни з того, що більшість робить неправильно, без повчального тону",
+    "почни з живої деталі або цитати з ситуації",
+]
+
+# Ротація фіналів — не кожен пост мусить закінчуватись питанням.
+POST_ENDING_STYLES = [
+    "закінчи конкретним питанням про особистий досвід читача (не загальним «а що думаєш ти?»)",
+    "закінчи мікро-дією, яку можна зробити за 1 хвилину",
+    "закінчи чесним нюансом або тим, де тут легко влетіти",
+    "закінчи короткою власною думкою-реплікою, без питання",
+    "закінчи вибором із двох варіантів, щоб читачу було що написати в комментарі",
+]
+
+# Фрази, які видають ШІ або вже набили оскому в каналі.
+BANNED_AI_PHRASES = [
+    "що це означає для тебе",
+    "що це значить для тебе",
+    "чому це важливо саме тобі",
+    "для тебе це означає",
+    "важливо зазначити",
+    "варто підкреслити",
+    "у сучасному світі",
+    "в епоху цифрових технологій",
+    "давайте розберемо",
+    "підсумовуючи",
+    "отже, підсумуємо",
+    "сподіваюся, це було корисно",
+    "а що думаєш ти?",
+    "як бачиш",
+]
+
+# ─────────────────────────────────────────
 # 7 СТИЛІВ ОФОРМЛЕННЯ КАРТИНОК
 # ─────────────────────────────────────────
 VISUAL_TEMPLATES = [
@@ -248,11 +315,16 @@ VISUAL_TEMPLATES = [
 # Правила слотів:
 # - будні: після 16:30 (школа);
 # - вихідні: після обіду (не раніше ~13:00);
-# - між двома постами дня — кілька годин проміжку;
+# - між постами дня — кілька годин проміжку;
 # - хвилини «нерівні», щоб не виглядало як бот на xx:00.
 # Фактичний час = слот + рандомний зсув (див. нижче).
+#
+# Денний слот (~14:40–15:10) тримаємо під рубрики, що не витрачають Gemini:
+# опитування, дані з відкритих API, шаблонні картки. Див. PLAN.md.
 SCHEDULE = {
     "monday": [
+        # Тимчасово вимкнено #ВгадайКраїну / #КраїнаВДеталях — повернути слот нижче.
+        # {"time": "14:52", "rubric": "country"},
         {"time": "16:47", "rubric": "ai_news"},
         {"time": "19:23", "rubric": "game_economy"},
     ],
@@ -282,6 +354,17 @@ SCHEDULE = {
     ],
 }
 
+# Ротація рубрик у межах одного слота: ключ у SCHEDULE → що він чергує.
+# Лічильник живе в Redis, тому перезапуск бота не збиває чергу.
+# Ключі-ротації самі в GENERATORS не потрібні — розгортаються в scheduler.
+ROTATIONS = {
+    "country": ["country_guess", "country_details"],
+}
+
+# Чим закрити слот, якщо рубрика не знайшла матеріалу (порожній результат).
+# Має бути безкоштовною рубрикою. Порожньо = слот просто пропускається.
+RUBRIC_FALLBACK = os.getenv("RUBRIC_FALLBACK", "")
+
 # Кібербезпека — 1-й і 3-й вівторок місяця (окремий крон у scheduler).
 CYBER_SCHEDULE_TIME = "20:17"
 
@@ -308,6 +391,13 @@ YOUTUBE_MIN_VIEWS = 20_000       # мінімум переглядів для в
 VIDEO_PUBLISHED_AFTER_HOURS = 96      # шукаємо відео за останні 4 дні
 VIDEO_MIN_VIEWS_FLOOR       = 5_000   # абсолютний мінімум для fallback
 VIDEO_MATCH_BONUS_ONLY      = True    # збіг зі свіжими новинами = бонус, не фільтр
+# videoDuration="short" у YouTube API = коротше 4 хв, тому демо й розбори
+# (5-20 хв) у видачу майже не потрапляли — лишались Shorts. Тривалість
+# фільтруємо самі за contentDetails.
+VIDEO_MIN_DURATION_SEC = int(os.getenv("VIDEO_MIN_DURATION_SEC", "90"))
+VIDEO_MAX_DURATION_SEC = int(os.getenv("VIDEO_MAX_DURATION_SEC", "1500"))
+# order="date" віддавав просто найновіше за вікном, а не найкраще по темі.
+YOUTUBE_SEARCH_ORDER = os.getenv("YOUTUBE_SEARCH_ORDER", "relevance")
 # Скільки YouTube Search запитів за один цикл монітора (кожен ≈ 100 units квоти).
 # Раніше брали всі 7 тем → легко ловили 429. Ротація покриває всі теми за кілька днів.
 VIDEO_SEARCH_QUERIES_PER_RUN = 3
@@ -325,6 +415,47 @@ VIDEO_REJECT_TTL_SEC = 12 * 3600
 VIDEO_QUEUE_MAX = int(os.getenv("VIDEO_QUEUE_MAX", "5"))
 # Щоденний слот #ВідеоТижня (Київ) — не в реалтайм-моніторі.
 VIDEO_SCHEDULE_TIME = os.getenv("VIDEO_SCHEDULE_TIME", "18:27")
+
+# ─────────────────────────────────────────
+# ТРЕНАЖЕР МОЗКУ (#ТренажерМозку)
+# ─────────────────────────────────────────
+# Стиль «Клуб 1%»: кмітливість, візуальна задача на картинці, бейдж «лише N%».
+# Більшість типів — код без Gemini. Тип `clever` викликає Gemini.
+BRAIN_SCHEDULE_TIME = os.getenv("BRAIN_SCHEDULE_TIME", "21:07")
+BRAIN_TYPES = (
+    # Нові «клубні» типи — частіше в ротації (ваги в generators/brain.py).
+    "pyramid", "mirror", "hidden_seq", "clever",
+    "sequence", "rebus", "odd_one_out",
+    "anagram", "caesar",
+    # Детективний клуб: задачі з солвером, відповідь гарантовано єдина.
+    "alibi", "liar", "order",
+)
+BRAIN_LEVEL_MIN = 1
+BRAIN_LEVEL_MAX = 5
+BRAIN_START_LEVEL = int(os.getenv("BRAIN_START_LEVEL", "2"))
+# Складність рухається за точністю відповідей каналу.
+BRAIN_LEVEL_UP_ACCURACY = int(os.getenv("BRAIN_LEVEL_UP_ACCURACY", "75"))
+BRAIN_LEVEL_DOWN_ACCURACY = int(os.getenv("BRAIN_LEVEL_DOWN_ACCURACY", "40"))
+# Менше голосів — вибірка невиразна, складність не рухаємо.
+BRAIN_MIN_VOTES_FOR_ADAPT = int(os.getenv("BRAIN_MIN_VOTES_FOR_ADAPT", "5"))
+# Скільки днів пам'ятаємо задачу, щоб не повторити її.
+BRAIN_SEEN_TTL_DAYS = int(os.getenv("BRAIN_SEEN_TTL_DAYS", "120"))
+
+# ─────────────────────────────────────────
+# КРАЇНИ (#ВгадайКраїну / #КраїнаВДеталях)
+# ─────────────────────────────────────────
+# Дані — Wikidata (українські назви в комплекті) + прапори з FlagCDN.
+# Обидва джерела без ключів; REST Countries із 2026-го вимагає авторизацію.
+# Кеш довідника, бо SPARQL-запит триває десятки секунд.
+COUNTRY_CACHE_TTL_DAYS = int(os.getenv("COUNTRY_CACHE_TTL_DAYS", "14"))
+# Скільки днів не повторювати країну (окремо для кожного режиму).
+COUNTRY_SEEN_TTL_DAYS = int(os.getenv("COUNTRY_SEEN_TTL_DAYS", "180"))
+# Відсіюємо мікродержави: про них немає що розповісти підлітку.
+COUNTRY_MIN_POPULATION = int(os.getenv("COUNTRY_MIN_POPULATION", "300000"))
+# «Вгадай країну»: скільки варіантів у опитуванні і скільки з них — сусіди
+# по континенту (з одного континенту складніше, ніж навмання).
+COUNTRY_POLL_OPTIONS = int(os.getenv("COUNTRY_POLL_OPTIONS", "4"))
+COUNTRY_SAME_CONTINENT_ODDS = float(os.getenv("COUNTRY_SAME_CONTINENT_ODDS", "0.7"))
 
 # Приймаємо лише відео цими мовами аудіо (порожня = невідомо, теж пропускаємо).
 # Мета — не постити ролики, які підліток не зрозуміє (напр. гінді на NDTV India).

@@ -10,9 +10,11 @@ from config import (
     SCHEDULE,
     SCHEDULE_RANDOM_OFFSET_MIN,
     SCHEDULE_RANDOM_OFFSET_MAX,
+    RUBRIC_FALLBACK,
     CYBER_SCHEDULE_TIME,
     QUIZ_ANSWER_CRON_TIME,
     VIDEO_SCHEDULE_TIME,
+    BRAIN_SCHEDULE_TIME,
     TIMEZONE,
     QUIZ_ANSWER_DELAY_HOURS,
     GEMINI_SCHEDULE_RETRIES,
@@ -22,11 +24,13 @@ from data.redis_client import get as redis_get
 from bot.publisher import publish, notify_moderator
 from generators.gemini import GeminiQuotaExhausted
 from utils.http_safe import safe_error_text
+from utils.rotation import next_rubric
 
 # Імпорти всіх генераторів
 from generators.ai_news import generate_ai_news
 from generators.ai_hack import generate_ai_hack
 from generators.video import generate_video
+from generators.brain import generate_brain
 from generators.crypto import generate_crypto
 from generators.crime import generate_crime
 from generators.careers import generate_careers
@@ -40,6 +44,7 @@ from generators.money_myth import generate_money_myth
 from generators.behavioral_finance import generate_behavioral_finance
 from generators.startup_week import generate_startup_week
 from generators.banknotes import generate_banknotes
+from generators.country import generate_country_details, generate_country_guess
 
 KYIV = pytz.timezone(TIMEZONE)
 logger = logging.getLogger(__name__)
@@ -49,6 +54,7 @@ GENERATORS = {
     "ai_news":       generate_ai_news,
     "ai_hack":       generate_ai_hack,
     "video":         generate_video,
+    "brain":         generate_brain,
     "crypto":        generate_crypto,
     "crime":         generate_crime,
     "careers":       generate_careers,
@@ -61,6 +67,9 @@ GENERATORS = {
     "money_myth":    generate_money_myth,
     "behavioral_finance": generate_behavioral_finance,
     "startup_week":   generate_startup_week,
+    # Режими рубрики про країни: слот "country" чергує їх через ROTATIONS.
+    "country_guess":   generate_country_guess,
+    "country_details": generate_country_details,
     # Подієва рубрика (також у моніторі) — для /test banknotes.
     "banknotes":      generate_banknotes,
 }
@@ -92,11 +101,17 @@ def _is_rate_limit_error(error: BaseException) -> bool:
 # ПУБЛІКАЦІЯ ОДНІЄЇ РУБРИКИ
 # ─────────────────────────────────────────
 
-async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
+async def publish_rubric(
+    rubric_key: str,
+    *,
+    attempt: int = 1,
+    allow_fallback: bool = True,
+) -> None:
     """Генерує і публікує один пост рубрики.
 
-    При 429/503 відкладає повтор через GEMINI_SCHEDULE_RETRY_DELAY_SEC,
-    щоб не втрачати денний слот через короткочасний збій API.
+    Ключ слота може бути ротацією (див. ROTATIONS) — тоді тут вибирається
+    конкретна рубрика на цей раз. При 429/503 відкладає повтор через
+    GEMINI_SCHEDULE_RETRY_DELAY_SEC, щоб не втрачати слот через збій API.
     """
 
     # Перевіряємо чи бот не на паузі
@@ -104,6 +119,7 @@ async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
     if paused:
         return
 
+    rubric_key = await next_rubric(rubric_key)
     generator = GENERATORS.get(rubric_key)
     if not generator:
         return
@@ -114,6 +130,8 @@ async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
             await publish(post_data)
         else:
             logger.info("[scheduler] Рубрика %s не дала контенту цього разу", rubric_key)
+            if allow_fallback:
+                await _publish_fallback(rubric_key)
     except GeminiQuotaExhausted as e:
         msg = str(e).lower()
         if "cooldown" in msg and attempt <= GEMINI_SCHEDULE_RETRIES:
@@ -129,13 +147,17 @@ async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
                 f"(спроба {attempt}/{GEMINI_SCHEDULE_RETRIES})."
             )
             await asyncio.sleep(delay)
-            await publish_rubric(rubric_key, attempt=attempt + 1)
+            await publish_rubric(
+                rubric_key, attempt=attempt + 1, allow_fallback=allow_fallback
+            )
             return
         logger.warning("[scheduler] Денний ліміт Gemini для %s: %s", rubric_key, e)
         await notify_moderator(
             f"🛑 Денний ліміт Gemini — рубрика «{rubric_key}» пропущена.\n"
             "Квота скидається ≈10:00 за Києвом (опівніч PT)."
         )
+        if allow_fallback:
+            await _publish_fallback(rubric_key)
     except Exception as e:
         if _is_rate_limit_error(e) and attempt <= GEMINI_SCHEDULE_RETRIES:
             delay = GEMINI_SCHEDULE_RETRY_DELAY_SEC * attempt
@@ -151,7 +173,9 @@ async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
                 f"(спроба {attempt}/{GEMINI_SCHEDULE_RETRIES})."
             )
             await asyncio.sleep(delay)
-            await publish_rubric(rubric_key, attempt=attempt + 1)
+            await publish_rubric(
+                rubric_key, attempt=attempt + 1, allow_fallback=allow_fallback
+            )
             return
         logger.exception(
             "[scheduler] Помилка генерації %s: %s",
@@ -161,6 +185,23 @@ async def publish_rubric(rubric_key: str, *, attempt: int = 1) -> None:
         await notify_moderator(
             f"⚠️ Збій генерації рубрики «{rubric_key}»: {safe_error_text(e)}"
         )
+        if allow_fallback:
+            await _publish_fallback(rubric_key)
+
+
+async def _publish_fallback(failed_rubric: str) -> None:
+    """Закриває порожній слот резервною рубрикою.
+
+    Без цього втрачений слот означає вечір без поста: генератор повернув
+    порожньо (немає свіжих даних, вигоріла квота) — і в каналі тиша.
+    Фолбек викликається лише раз, сам себе не рекурсує.
+    """
+    fallback = (RUBRIC_FALLBACK or "").strip()
+    if not fallback or fallback == failed_rubric or fallback not in GENERATORS:
+        return
+
+    logger.info("[scheduler] Слот %s закриваю резервною %s", failed_rubric, fallback)
+    await publish_rubric(fallback, allow_fallback=False)
 
 
 # ─────────────────────────────────────────
@@ -262,6 +303,16 @@ def setup_scheduler() -> AsyncIOScheduler:
         CronTrigger(hour=video_hour, minute=video_minute, timezone=KYIV),
         args=["video"],
         id="video_daily",
+        replace_existing=True,
+    )
+
+    # ── ТРЕНАЖЕР МОЗКУ — щодня, без Gemini ──
+    brain_hour, brain_minute = _parse_hhmm(BRAIN_SCHEDULE_TIME)
+    scheduler.add_job(
+        publish_rubric,
+        CronTrigger(hour=brain_hour, minute=brain_minute, timezone=KYIV),
+        args=["brain"],
+        id="brain_daily",
         replace_existing=True,
     )
 

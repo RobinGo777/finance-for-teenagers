@@ -145,12 +145,49 @@ def _split_caption(text: str, first_limit: int = 1000) -> tuple[str, list[str]]:
     return head[0], head[1:] + chunks[1:]
 
 
+async def _photo_input(photo):
+    """bytes / BufferedInputFile / URL → те, що прийме send_photo.
+
+    Telegram сам качає URL і часто падає з «failed to get HTTP URL content»
+    на новинних CDN. Тому URL спочатку тягнемо ми.
+    """
+    if photo is None:
+        return None
+    if isinstance(photo, (bytes, bytearray)):
+        return BufferedInputFile(bytes(photo), filename="post.png")
+    if isinstance(photo, BufferedInputFile):
+        return photo
+    if isinstance(photo, str) and photo.startswith(("http://", "https://")):
+        from images.generator import download_image_bytes
+
+        data = await download_image_bytes(photo)
+        if not data:
+            logger.warning("[publisher] URL фото недоступний: %s", photo[:120])
+            return None
+        name = "remote.jpg"
+        lower = photo.lower()
+        if ".png" in lower:
+            name = "remote.png"
+        elif ".webp" in lower:
+            name = "remote.webp"
+        return BufferedInputFile(data, filename=name)
+    return photo
+
+
 async def _send_photo_with_text(chat_id, photo, text: str) -> int:
     """Надсилає фото з підписом; надлишок тексту — окремими повідомленнями."""
     caption, rest = _split_caption(text)
+    resolved = await _photo_input(photo)
+    if resolved is None:
+        msg = await bot.send_message(
+            chat_id=chat_id,
+            text=_prepare_html(text, MESSAGE_LIMIT),
+            parse_mode="HTML",
+        )
+        return msg.message_id
     msg = await bot.send_photo(
         chat_id=chat_id,
-        photo=photo,
+        photo=resolved,
         caption=_prepare_html(caption, CAPTION_LIMIT),
         parse_mode="HTML",
     )
@@ -235,16 +272,11 @@ async def send_test_preview(post_data: dict) -> None:
 
     image = post_data.get("image")
     image_url = post_data.get("image_url")
-    if image:
+    photo = await _photo_input(image or image_url)
+    if photo:
         await bot.send_photo(
             chat_id=MODERATOR_CHAT_ID,
-            photo=BufferedInputFile(image, filename=f"test-{rubric}.png"),
-            caption=header,
-        )
-    elif image_url:
-        await bot.send_photo(
-            chat_id=MODERATOR_CHAT_ID,
-            photo=image_url,
+            photo=photo,
             caption=header,
         )
     else:
@@ -318,10 +350,9 @@ async def publish_to_channel(post_data: dict) -> int | None:
 
     # ── Пост з картинкою (Pillow bytes) ──
     if image:
-        photo = BufferedInputFile(image, filename="post.png")
-        return await _send_photo_with_text(TELEGRAM_CHANNEL_ID, photo, text)
+        return await _send_photo_with_text(TELEGRAM_CHANNEL_ID, image, text)
 
-    # ── Пост з YouTube thumbnail ──
+    # ── Пост з remote URL (YouTube thumbnail тощо) ──
     if image_url:
         return await _send_photo_with_text(TELEGRAM_CHANNEL_ID, image_url, text)
 
@@ -514,18 +545,11 @@ async def send_to_moderator(post_data: dict) -> None:
 
     image = post_data.get("image")
     image_url = post_data.get("image_url")
-    if image:
-        photo = BufferedInputFile(image, filename="preview.png")
+    photo = await _photo_input(image or image_url)
+    if photo:
         await bot.send_photo(
             chat_id=MODERATOR_CHAT_ID,
             photo=photo,
-            caption=caption,
-            reply_markup=keyboard,
-        )
-    elif image_url:
-        await bot.send_photo(
-            chat_id=MODERATOR_CHAT_ID,
-            photo=image_url,
             caption=caption,
             reply_markup=keyboard,
         )

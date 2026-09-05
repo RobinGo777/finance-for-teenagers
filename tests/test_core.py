@@ -579,6 +579,63 @@ class BanknoteFilterTests(unittest.TestCase):
     def test_banknotes_in_generators(self) -> None:
         self.assertIn("banknotes", GENERATORS)
 
+    def test_remote_image_magic_check(self) -> None:
+        from images.generator import _looks_like_image
+
+        jpeg = b"\xff\xd8\xff" + b"\x00" * 300
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 300
+        html = b"<!DOCTYPE html>" + b"x" * 300
+        self.assertTrue(_looks_like_image(jpeg))
+        self.assertTrue(_looks_like_image(png))
+        self.assertFalse(_looks_like_image(html))
+        self.assertFalse(_looks_like_image(b"tiny"))
+        self.assertTrue(_looks_like_image(b"x" * 300, "image/jpeg"))
+
+    def test_accepts_russian_bonistika_headlines(self) -> None:
+        from data.banknotes import score_banknote_item
+
+        self.assertGreater(
+            score_banknote_item("Представлена новая канадская купюра"),
+            0,
+        )
+        self.assertGreater(
+            score_banknote_item("О новой серии пакистанских банкнот"),
+            0,
+        )
+        self.assertEqual(
+            score_banknote_item("Аукцион: редкая банкнота продается"),
+            0,
+        )
+
+    def test_bonistika_article_parser(self) -> None:
+        from data.bonistika import parse_bonistika_article, parse_home_news_ids
+
+        home = """
+        <a class="list-group-item list-group-item-action" href="/news/show/5642">A</a>
+        <a href="/news/show/5641">B</a>
+        <a href="/news/show/5642">dup</a>
+        """
+        self.assertEqual(parse_home_news_ids(home, limit=5), [5642, 5641])
+
+        html = """
+        <meta property="og:title" content="Представлена новая канадская купюра" />
+        <meta property="og:description" content="Банк Канады показал дизайн купюры 20 долларов." />
+        <meta property="og:image" content="https://bonistika.net/img_news/120/abc.jpg" />
+        <meta property="og:url" content="https://bonistika.net/news/show/5642" />
+        <h1>Представлена новая канадская купюра</h1>
+        <small><a href="/user/profile/show/19" class="comment">zbeer</a> 2026-09-04: </small>
+        <div class="card-text">Полный текст новости про купюру.</div>
+        """
+        item = parse_bonistika_article(html, 5642)
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item["title"], "Представлена новая канадская купюра")
+        self.assertEqual(item["published"], "2026-09-04")
+        self.assertEqual(item["source"], "bonistika.net")
+        self.assertIn("img_news/abc.jpg", item["image_url"])
+        self.assertNotIn("/120/", item["image_url"])
+        self.assertIn("5642", item["url"])
+
     def test_same_banknote_different_headlines_match(self) -> None:
         from data.banknotes import issue_fingerprint, titles_too_similar
 

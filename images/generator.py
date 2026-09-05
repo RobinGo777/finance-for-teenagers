@@ -47,6 +47,60 @@ def _strip_unrenderable(text: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+_IMAGE_MAGIC = (
+    b"\xff\xd8\xff",          # JPEG
+    b"\x89PNG\r\n\x1a\n",     # PNG
+    b"GIF87a",
+    b"GIF89a",
+    b"RIFF",                  # WEBP (далі «WEBP»)
+)
+_MAX_REMOTE_IMAGE = 5_000_000
+_MIN_REMOTE_IMAGE = 200
+
+
+def _looks_like_image(data: bytes, content_type: str = "") -> bool:
+    if len(data) < _MIN_REMOTE_IMAGE or len(data) > _MAX_REMOTE_IMAGE:
+        return False
+    if any(data.startswith(magic) for magic in _IMAGE_MAGIC):
+        if data.startswith(b"RIFF") and b"WEBP" not in data[:16]:
+            return False
+        return True
+    return content_type.lower().startswith("image/")
+
+
+async def download_image_bytes(url: str, *, timeout: float = 15.0) -> bytes | None:
+    """Качає картинку самі — Telegram часто не дістає urlToImage з новин.
+
+    Повертає bytes або None, якщо URL битий / не картинка / таймаут.
+    """
+    clean = (url or "").strip()
+    if not clean.startswith(("http://", "https://")):
+        return None
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(
+                clean,
+                headers={"User-Agent": "FinProBot/1.0 (Telegram channel)"},
+            )
+            response.raise_for_status()
+            data = response.content
+            if not _looks_like_image(data, response.headers.get("content-type", "")):
+                logger.warning(
+                    "[images] URL не схожий на картинку (%s bytes, %s): %s",
+                    len(data),
+                    response.headers.get("content-type", "?"),
+                    clean[:120],
+                )
+                return None
+            return data
+    except Exception as error:
+        logger.warning("[images] Не вдалося завантажити %s: %s", clean[:120], error)
+        return None
+
+
 def _strip_unrenderable_keep_layout(text: str) -> str:
     """Як _strip_unrenderable, але зберігає переноси й пробіли (піраміди, схеми)."""
     cleaned = _UNRENDERABLE.sub("", text or "")

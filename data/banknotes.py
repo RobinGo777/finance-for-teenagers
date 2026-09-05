@@ -11,6 +11,8 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 from config import (
+    BANKNOTE_BONISTIKA,
+    BANKNOTE_BONISTIKA_LIMIT,
     BANKNOTE_LOOKBACK_DAYS,
     BANKNOTE_MAX_CANDIDATES,
     BANKNOTE_MIN_SCORE,
@@ -33,6 +35,8 @@ _BANKNOTE_TERMS = (
     "банкнота",
     "банкноти",
     "купюр",
+    "денежных знаков",
+    "денежные знаки",
 )
 
 _FRESH_TERMS = (
@@ -63,6 +67,32 @@ _FRESH_TERMS = (
     "ввела в обіг",
     "презентувала банкнот",
     "презентував банкнот",
+    # bonistika.net / російські заголовки
+    "новая купюр",
+    "новую купюр",
+    "новой купюр",
+    "новые купюр",
+    "новая банкнот",
+    "новую банкнот",
+    "новой банкнот",
+    "новые банкнот",
+    "новой серии",
+    "новая серия",
+    "нового поколения",
+    "представлена",
+    "представил",
+    "презентац",
+    "выпустил в обращение",
+    "выпущена",
+    "выпущены",
+    "введена в обращение",
+    "введены в обращение",
+    "юбилейн",
+    "памятн",
+    "новый номинал",
+    "новый дизайн",
+    "модернизован",
+    "обновленн",
 )
 
 # Відсікаємо аукціони, «скільки коштує рідкісна», каталожний шум.
@@ -98,6 +128,10 @@ _SPAM_TERMS = (
     "скільки коштує",
     "рідкісна банкнота",
     "найдорожч",
+    "аукцион",
+    "продается",
+    "сколько стоит",
+    "оценка банкнот",
 )
 
 _SPACE_RE = re.compile(r"\s+")
@@ -232,9 +266,22 @@ def score_banknote_item(title: str, summary: str = "") -> int:
     # Бонус за конкретність (країна/номінал часто в заголовку з цифрами).
     if re.search(r"\b\d+\b", title or ""):
         score += 2
-    if any(w in text for w in ("commemorative", "anniversary", "jubilee", "ювілейн", "пам'ятн")):
+    if any(
+        w in text
+        for w in (
+            "commemorative", "anniversary", "jubilee",
+            "ювілейн", "пам'ятн", "юбилейн", "памятн",
+        )
+    ):
         score += 4
-    if any(w in text for w in ("central bank", "national bank", "нбу", "ecb", "bank of")):
+    if any(
+        w in text
+        for w in (
+            "central bank", "national bank", "нбу", "ecb", "bank of",
+            "банк канады", "центральный банк", "национальный банк",
+            "государственный банк",
+        )
+    ):
         score += 3
 
     return score
@@ -355,17 +402,33 @@ async def _fetch_rss_banknotes() -> list[dict]:
     return all_items
 
 
+async def _fetch_bonistika_banknotes() -> list[dict]:
+    from data.bonistika import fetch_bonistika_news
+
+    if not BANKNOTE_BONISTIKA:
+        return []
+    try:
+        return await fetch_bonistika_news(limit=BANKNOTE_BONISTIKA_LIMIT)
+    except Exception as error:
+        logger.warning("[banknotes] bonistika: %s", error)
+        return []
+
+
 async def fetch_new_banknotes() -> list[dict]:
     """Повертає відфільтровані свіжі/ювілейні випуски (без спаму)."""
-    news_items, rss_items = await asyncio.gather(
+    news_items, rss_items, bonistika_items = await asyncio.gather(
         _fetch_newsapi_banknotes(),
         _fetch_rss_banknotes(),
+        _fetch_bonistika_banknotes(),
     )
-    combined = news_items + rss_items
+    combined = news_items + rss_items + bonistika_items
     filtered = filter_banknote_candidates(combined)
     logger.info(
-        "[banknotes] кандидатів сирих=%s, після фільтра=%s",
+        "[banknotes] кандидатів сирих=%s (news=%s rss=%s bonistika=%s), після фільтра=%s",
         len(combined),
+        len(news_items),
+        len(rss_items),
+        len(bonistika_items),
         len(filtered),
     )
     return filtered

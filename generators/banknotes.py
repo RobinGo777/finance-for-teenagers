@@ -24,7 +24,7 @@ from data.redis_client import (
     save_topic,
 )
 from generators.gemini import generate_json, is_quota_paused, GeminiQuotaExhausted
-from images.generator import generate_post_image_async
+from images.generator import download_image_bytes, generate_post_image_async
 from config import (
     BANKNOTE_MAX_PER_DAY,
     BANKNOTE_USE_SEARCH,
@@ -223,9 +223,20 @@ async def generate_banknotes() -> dict | None:
         VISUAL_TEMPLATES[0],
     )
 
+    # NewsAPI urlToImage часто битий / блокує Telegram («failed to get HTTP URL
+    # content»). Качаємо самі; якщо не вийшло — малюємо картку.
     image_url = (item.get("image_url") or "").strip()
     image_bytes = None
-    if not image_url:
+    if image_url:
+        image_bytes = await download_image_bytes(image_url)
+        if image_bytes:
+            logger.info("[banknotes] фото з джерела: %s", image_url[:80])
+        else:
+            logger.warning(
+                "[banknotes] джерело фото недоступне, малюємо картку: %s",
+                image_url[:80],
+            )
+    if not image_bytes:
         image_bytes = await generate_post_image_async(
             title=data.get("title", RUBRIC_NAME),
             body=data.get("body_preview", ""),
@@ -236,7 +247,7 @@ async def generate_banknotes() -> dict | None:
 
     await save_topic(RUBRIC_KEY, topic)
 
-    result = {
+    return {
         "rubric": RUBRIC_KEY,
         "topic": topic,
         "post": post,
@@ -245,9 +256,5 @@ async def generate_banknotes() -> dict | None:
         "source_url": item.get("url") or "",
         "item_id": dedupe_ids[0],
         "dedupe_ids": dedupe_ids,
+        "image": image_bytes,
     }
-    if image_url:
-        result["image_url"] = image_url
-    else:
-        result["image"] = image_bytes
-    return result

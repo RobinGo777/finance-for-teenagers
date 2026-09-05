@@ -193,6 +193,11 @@ BANKNOTE_MAX_PER_CYCLE = int(os.getenv("BANKNOTE_MAX_PER_CYCLE", "3"))
 BANKNOTE_USE_SEARCH = os.getenv("BANKNOTE_USE_SEARCH", "0").strip().lower() in {
     "1", "true", "yes", "on",
 }
+# bonistika.net — спеціалізовані новини (RU→UA через Gemini).
+BANKNOTE_BONISTIKA = os.getenv("BANKNOTE_BONISTIKA", "1").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+BANKNOTE_BONISTIKA_LIMIT = int(os.getenv("BANKNOTE_BONISTIKA_LIMIT", "6"))
 
 # ─────────────────────────────────────────
 # 4 ПЕРСОНИ-АВТОРИ

@@ -797,12 +797,29 @@ class BrainTrainerTests(unittest.TestCase):
                 )
 
     def test_percent_badge_grows_harder_with_level(self) -> None:
-        from generators.brain import _percent_for
+        from generators.brain import _PERCENT_BANDS, _percent_for
 
-        percents = [_percent_for(level) for level in range(1, 6)]
-        self.assertEqual(percents, sorted(percents, reverse=True))
-        self.assertEqual(percents[0], 90)
-        self.assertEqual(percents[-1], 5)
+        # Жорсткіші рівні — нижчий діапазон відсотків.
+        highs = [_PERCENT_BANDS[level][1] for level in range(1, 6)]
+        self.assertEqual(highs, sorted(highs, reverse=True))
+        self.assertEqual(_PERCENT_BANDS[1][0], 80)
+        self.assertEqual(_PERCENT_BANDS[5][1], 8)
+
+        # Без підмішування сусідів значення лишаються в своєму діапазоні.
+        import generators.brain as brain
+        from unittest.mock import patch
+
+        with patch.object(brain.random, "random", return_value=0.99):
+            for level in range(1, 6):
+                low, high = _PERCENT_BANDS[level]
+                for _ in range(30):
+                    value = _percent_for(level)
+                    self.assertGreaterEqual(value, low)
+                    self.assertLessEqual(value, high)
+
+        # Підряд кілька викликів не дають одне й те саме число (майже завжди).
+        samples = {_percent_for(2) for _ in range(40)}
+        self.assertGreaterEqual(len(samples), 3)
 
     def test_clever_accepts_valid_gemini_payload(self) -> None:
         import asyncio

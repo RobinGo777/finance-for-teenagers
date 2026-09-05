@@ -72,8 +72,19 @@ KIND_LABELS = {
     "clever": "кмітливість",
 }
 
-# Орієнтир «скільки людей розв'язують» — як у шоу, не як шкільна оцінка.
-_PERCENT_BY_LEVEL = {1: 90, 2: 70, 3: 45, 4: 20, 5: 5}
+# Орієнтир «скільки людей розв'язують» — як у шоу: діапазон за рівнем,
+# а конкретне число щоразу випадкове (щоб не висіло одне й те саме «70%»).
+_PERCENT_BANDS = {
+    1: (80, 95),
+    2: (55, 75),
+    3: (30, 50),
+    4: (10, 25),
+    5: (1, 8),
+}
+_SHOW_PERCENTS = (
+    1, 2, 3, 5, 7, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40, 45,
+    50, 55, 60, 65, 70, 75, 80, 85, 90, 95,
+)
 
 # Ваги в ротації: нові «клубні» типи частіше, старі анаграми/Цезар — рідше.
 _KIND_WEIGHTS = {
@@ -566,7 +577,7 @@ async def _make_clever(level: int) -> Puzzle | None:
     """Кмітлива задача від Gemini у стилі «Клуб 1%»."""
     from generators.gemini import generate_json
 
-    percent = _PERCENT_BY_LEVEL.get(level, 45)
+    percent = _percent_for(level)
     themes = [
         "літери й слова українською",
         "числа й прості закономірності",
@@ -1046,7 +1057,19 @@ def _level_bar(level: int) -> str:
 
 
 def _percent_for(level: int) -> int:
-    return _PERCENT_BY_LEVEL.get(level, 45)
+    """Випадковий «шоу-відсоток» у діапазоні рівня — щодня різний.
+
+    Іноді підхоплює сусідній діапазон, щоб бейдж не залипав
+    (наприклад на постійних 70%), поки адаптація ще не зрушила рівень.
+    """
+    low, high = _PERCENT_BANDS.get(level, (35, 50))
+    if random.random() < 0.45:
+        neighbor = level + random.choice((-1, 1))
+        if neighbor in _PERCENT_BANDS:
+            n_low, n_high = _PERCENT_BANDS[neighbor]
+            low, high = min(low, n_low), max(high, n_high)
+    pool = [value for value in _SHOW_PERCENTS if low <= value <= high]
+    return random.choice(pool) if pool else (low + high) // 2
 
 
 def _tasks_word(count: int) -> str:

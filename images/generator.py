@@ -47,6 +47,13 @@ def _strip_unrenderable(text: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
+def _strip_unrenderable_keep_layout(text: str) -> str:
+    """Як _strip_unrenderable, але зберігає переноси й пробіли (піраміди, схеми)."""
+    cleaned = _UNRENDERABLE.sub("", text or "")
+    # Прибираємо лише хвости рядків — внутрішні пробіли лишаємо для вирівнювання.
+    return "\n".join(line.rstrip() for line in cleaned.split("\n")).rstrip()
+
+
 TEXT_MARGIN = 48  # лівий і правий відступ тексту на картинці
 
 
@@ -894,28 +901,75 @@ def generate_brain_image(
             fill=bg_color,
         )
 
-    # Зона задачі: моноширинний вигляд через великий bold і збереження пробілів.
-    clean_body = _strip_unrenderable(body or "").rstrip()
-    body_lines = [line for line in clean_body.split("\n")] if clean_body else []
-    # Довгі рядки без переносу ламають піраміду — підганяємо кегль.
+    # Зона задачі: підганяємо кегль і переносимо довгі рядки, щоб
+    # не обрізати початок/кінець і не вилазити за футер.
+    clean_body = _strip_unrenderable_keep_layout(body or "")
+    raw_lines = clean_body.split("\n") if clean_body else []
     max_body_w = IMG_WIDTH - TEXT_MARGIN * 2
-    font_size = 72 if len(body_lines) <= 3 else (58 if len(body_lines) <= 5 else 48)
+    top_y = 100
+    footer_y = IMG_HEIGHT - 64
+    prompt_budget = 100 if prompt else 24
+    avail_h = max(120, footer_y - top_y - prompt_budget)
+
+    font_size = 72 if len(raw_lines) <= 3 else (56 if len(raw_lines) <= 6 else 44)
+    fitted_lines: list[str] = list(raw_lines)
     font_body = _load_font(FONT_PATH, font_size)
-    while font_size > 32:
-        widest = max((_text_width(line, font_body) for line in body_lines), default=0)
-        if widest <= max_body_w:
+    line_gap = max(36, font_size + 8)
+
+    while font_size >= 22:
+        font_body = _load_font(FONT_PATH, font_size)
+        wrapped: list[str] = []
+        for line in raw_lines:
+            if not line.strip():
+                wrapped.append("")
+                continue
+            # Короткі «візуальні» рядки (піраміда, літери) не ріжемо —
+            # лише справді довгі прозові умови.
+            if _text_width(line, font_body) <= max_body_w:
+                wrapped.append(line)
+            else:
+                piece = _wrap_text_to_width(line, font_body, max_body_w)
+                wrapped.extend(piece.split("\n") if piece else [line])
+        line_gap = max(28, font_size + 6)
+        if len(wrapped) * line_gap <= avail_h:
+            fitted_lines = wrapped
             break
         font_size -= 4
-        font_body = _load_font(FONT_PATH, font_size)
+    else:
+        # Навіть мінімальний кегль не вміщає все — лишаємо те, що влізе,
+        # з «…» на останньому рядку, щоб було видно обрізку.
+        font_body = _load_font(FONT_PATH, 22)
+        line_gap = 28
+        wrapped = []
+        for line in raw_lines:
+            if not line.strip():
+                wrapped.append("")
+                continue
+            if _text_width(line, font_body) <= max_body_w:
+                wrapped.append(line)
+            else:
+                piece = _wrap_text_to_width(line, font_body, max_body_w)
+                wrapped.extend(piece.split("\n") if piece else [line])
+        max_lines = max(1, avail_h // line_gap)
+        if len(wrapped) > max_lines:
+            fitted_lines = wrapped[: max_lines - 1] + ["…"]
+        else:
+            fitted_lines = wrapped
 
-    line_gap = max(52, font_size + 10)
-    body_h = len(body_lines) * line_gap
-    # Залишаємо місце під питання й футер.
-    prompt_budget = 110 if prompt else 40
-    start_y = max(100, (IMG_HEIGHT - body_h - prompt_budget) // 2)
+    body_h = len(fitted_lines) * line_gap
+    start_y = top_y + max(0, (avail_h - body_h) // 2)
 
-    for index, line in enumerate(body_lines[:8]):
+    for index, line in enumerate(fitted_lines):
+        if not line:
+            continue
         width = _text_width(line, font_body)
+        # Якщо рядок усе ще ширший (дуже довге «слово») — підрізаємо з кінця.
+        if width > max_body_w:
+            trimmed = line
+            while trimmed and _text_width(trimmed + "…", font_body) > max_body_w:
+                trimmed = trimmed[:-1]
+            line = (trimmed + "…") if trimmed else "…"
+            width = _text_width(line, font_body)
         draw.text(
             ((IMG_WIDTH - width) // 2, start_y + index * line_gap),
             line,
@@ -924,11 +978,11 @@ def generate_brain_image(
         )
 
     if prompt:
-        font_prompt = _load_font(FONT_PATH_REGULAR, 34)
+        font_prompt = _load_font(FONT_PATH_REGULAR, 32)
         clean_prompt = _strip_unrenderable(prompt)
         wrapped = _wrap_text_to_width(clean_prompt, font_prompt, max_body_w) or ""
         prompt_lines = wrapped.split("\n")[:2]
-        prompt_y = start_y + body_h + 28
+        prompt_y = min(start_y + body_h + 20, footer_y - 48 - 40 * (len(prompt_lines) - 1))
         for index, line in enumerate(prompt_lines):
             width = _text_width(line, font_prompt)
             draw.text(
